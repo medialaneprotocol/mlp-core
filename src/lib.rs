@@ -44,7 +44,7 @@
 //! | [`bwe`] | the bandwidth estimator |
 //! | [`pacer`] | the token-bucket pacer |
 //! | [`scheduler`] | priority scheduling and repair plans |
-//! | [`blocks`] | per-receiver convergence accounting over a repair-cell grid |
+//! | [`cells`] | per-receiver convergence accounting over a repair-cell grid |
 //! | [`resume`] | parking, resume, and the reconnect ladder |
 //! | [`input`] | the input path: sequencing, deadlines, and the pressed set |
 //! | [`lifecycle`] | the lane's state vocabulary |

@@ -71,7 +71,10 @@ impl ResumeRejectReason {
     }
 
     /// Parse the wire string.
-    pub fn from_str(value: &str) -> Option<Self> {
+    ///
+    /// Named `parse` rather than `from_str` so it is not mistaken for
+    /// `std::str::FromStr::from_str`, which returns a `Result`.
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "ok" => Some(Self::Ok),
             "unknown_session" => Some(Self::UnknownSession),
@@ -186,8 +189,8 @@ pub struct HeldViewerState {
     pub next_update_id: u64,
     /// The last update id the sender emitted.
     pub last_sent_frame_id: u64,
-    /// Blocks the sender knows are unacked.
-    pub pending_blocks: u64,
+    /// Cells the sender knows are unacked.
+    pub pending_cells: u64,
     /// Held keys and buttons.
     pub pressed: Vec<InputToken>,
     /// The receiver's next input sequence.
@@ -208,7 +211,7 @@ impl Default for HeldViewerState {
             epoch: 0,
             next_update_id: 1,
             last_sent_frame_id: 0,
-            pending_blocks: 0,
+            pending_cells: 0,
             pressed: Vec::new(),
             input_seq_next: 0,
             active_path: MediaPath::Unknown,
@@ -224,8 +227,8 @@ impl Default for HeldViewerState {
 pub enum ResumeAction {
     /// Rebase the receiver's accounting onto the held state.
     Rebase {
-        /// Blocks the sender will re-send.
-        pending_blocks: u64,
+        /// Cells the sender will re-send.
+        pending_cells: u64,
     },
     /// Start an anchor plan with the given reason.
     StartAnchorPlan {
@@ -253,8 +256,8 @@ pub struct ResumeOutcome {
     pub reason: ResumeRejectReason,
     /// The next update id.
     pub next_update_id: u64,
-    /// Blocks the sender will re-send.
-    pub pending_blocks: u64,
+    /// Cells the sender will re-send.
+    pub pending_cells: u64,
     /// Current pace.
     pub pace_bps: u32,
     /// Current budget.
@@ -319,7 +322,7 @@ pub fn decide_resume(
             state.epoch = state.epoch.wrapping_add(1);
             state.next_update_id = state.next_update_id.max(1);
             state.last_sent_frame_id = 0;
-            state.pending_blocks = state.pending_blocks.max(1);
+            state.pending_cells = state.pending_cells.max(1);
             actions.push(ResumeAction::StartAnchorPlan {
                 reason: PlanStartReason::Resume,
             });
@@ -329,7 +332,7 @@ pub fn decide_resume(
             accepted: false,
             reason,
             next_update_id: state.next_update_id,
-            pending_blocks: state.pending_blocks,
+            pending_cells: state.pending_cells,
             pace_bps: state.pace_bps.min(u64::from(u32::MAX)) as u32,
             budget_bytes: state.budget_bytes,
             target_fps: state.target_fps.round().max(1.0) as u32,
@@ -348,10 +351,10 @@ pub fn decide_resume(
             reason: PlanStartReason::Epoch,
         });
     }
-    // Rebase: blocks the receiver never applied stay pending.
-    let pending = state.pending_blocks;
+    // Rebase: cells the receiver never applied stay pending.
+    let pending = state.pending_cells;
     actions.push(ResumeAction::Rebase {
-        pending_blocks: pending,
+        pending_cells: pending,
     });
     if pending > 0 && !anchor_plan_started {
         anchor_plan_started = true;
@@ -386,7 +389,7 @@ pub fn decide_resume(
         accepted: true,
         reason: ResumeRejectReason::Ok,
         next_update_id: state.next_update_id,
-        pending_blocks: pending,
+        pending_cells: pending,
         pace_bps: state.pace_bps.min(u64::from(u32::MAX)) as u32,
         budget_bytes: state.budget_bytes,
         target_fps: state.target_fps.round().max(1.0) as u32,
@@ -639,7 +642,7 @@ impl ReconnectLadder {
         if attempt == 0 {
             return 0;
         }
-        let exponent = u32::from(attempt.saturating_sub(1)).min(16);
+        let exponent = attempt.saturating_sub(1).min(16);
         let scaled = self.base_ms.saturating_mul(1u64 << exponent);
         let delay = scaled.clamp(RECONNECT_FLOOR_MS, self.cap_ms);
         delay + jitter_sample_ms.min(self.jitter_ms)
@@ -762,7 +765,7 @@ mod tests {
             ResumeRejectReason::EpochMismatch,
             ResumeRejectReason::ParkEvicted,
         ] {
-            assert_eq!(ResumeRejectReason::from_str(reason.as_str()), Some(reason));
+            assert_eq!(ResumeRejectReason::parse(reason.as_str()), Some(reason));
         }
     }
 
@@ -785,7 +788,7 @@ mod tests {
         let mut state = HeldViewerState {
             epoch: 3,
             next_update_id: 41,
-            pending_blocks: 0,
+            pending_cells: 0,
             pressed: vec![InputToken::Key(16), InputToken::Button(1)],
             input_seq_next: 90,
             ..HeldViewerState::default()
@@ -797,7 +800,7 @@ mod tests {
         assert!(!outcome.anchor_plan_started);
         assert_eq!(
             outcome.actions,
-            vec![ResumeAction::Rebase { pending_blocks: 0 }]
+            vec![ResumeAction::Rebase { pending_cells: 0 }]
         );
         assert_eq!(state.input_seq_next, 100);
         assert_eq!(state.active_path, MediaPath::Ws);
@@ -807,7 +810,7 @@ mod tests {
     fn pending_blocks_start_a_plan_on_resume() {
         let mut state = HeldViewerState {
             epoch: 3,
-            pending_blocks: 12,
+            pending_cells: 12,
             ..HeldViewerState::default()
         };
         let outcome = decide_resume(&request(3), 1_500, &mut state, true, false);
@@ -822,7 +825,7 @@ mod tests {
     fn epoch_mismatch_starts_a_plan_but_attaches() {
         let mut state = HeldViewerState {
             epoch: 5,
-            pending_blocks: 0,
+            pending_cells: 0,
             ..HeldViewerState::default()
         };
         let outcome = decide_resume(&request(7), 1_500, &mut state, true, false);
@@ -839,7 +842,7 @@ mod tests {
         let mut state = HeldViewerState {
             epoch: 3,
             next_update_id: 90,
-            pending_blocks: 0,
+            pending_cells: 0,
             ..HeldViewerState::default()
         };
         let outcome = decide_resume(&request(3), 2_000, &mut state, false, true);
@@ -884,7 +887,7 @@ mod tests {
         assert_eq!(
             outcome.actions,
             vec![
-                ResumeAction::Rebase { pending_blocks: 0 },
+                ResumeAction::Rebase { pending_cells: 0 },
                 ResumeAction::ReleaseKeys {
                     tokens: vec![InputToken::Key(17), InputToken::Button(1)]
                 },

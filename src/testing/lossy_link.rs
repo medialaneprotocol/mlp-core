@@ -243,17 +243,17 @@ impl LinkProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Endpoint {
     /// The sender.
-    Host,
+    Sender,
     /// The receiver (browser).
-    Viewer,
+    Receiver,
 }
 
 impl Endpoint {
     /// The other end.
     pub const fn peer(self) -> Self {
         match self {
-            Self::Host => Self::Viewer,
-            Self::Viewer => Self::Host,
+            Self::Sender => Self::Receiver,
+            Self::Receiver => Self::Sender,
         }
     }
 }
@@ -472,14 +472,14 @@ impl LossyLink {
             return;
         }
         let rate_bps = match from {
-            Endpoint::Host => self.profile.rate_bps_down,
-            Endpoint::Viewer => self.profile.rate_bps_up,
+            Endpoint::Sender => self.profile.rate_bps_down,
+            Endpoint::Receiver => self.profile.rate_bps_up,
         }
         .max(1);
         let serialization_ms = (bytes.len() as f64 * 8.0 * 1_000.0 / rate_bps as f64).ceil() as u64;
         let busy = match from {
-            Endpoint::Host => &mut self.busy_down_until_ms,
-            Endpoint::Viewer => &mut self.busy_up_until_ms,
+            Endpoint::Sender => &mut self.busy_down_until_ms,
+            Endpoint::Receiver => &mut self.busy_up_until_ms,
         };
         let start = (*busy).max(self.now_ms);
         let finish = start + serialization_ms;
@@ -493,7 +493,7 @@ impl LossyLink {
                 JitterDist::Pareto => self.rng.pareto(self.profile.jitter_ms),
             };
         }
-        if from == Endpoint::Viewer {
+        if from == Endpoint::Receiver {
             delay += self.profile.ack_delay_ms as f64;
         }
         if reorder {
@@ -616,11 +616,11 @@ mod tests {
     #[test]
     fn perfect_link_delivers_everything_in_order() {
         let mut link = LossyLink::new(LinkProfile::perfect());
-        link.transmit(Endpoint::Host, vec![1; 100]);
-        link.transmit(Endpoint::Host, vec![2; 100]);
+        link.transmit(Endpoint::Sender, vec![1; 100]);
+        link.transmit(Endpoint::Sender, vec![2; 100]);
         let deliveries = link.advance_to(1_000);
         assert_eq!(deliveries.len(), 2);
-        assert_eq!(deliveries[0].to, Endpoint::Viewer);
+        assert_eq!(deliveries[0].to, Endpoint::Receiver);
         assert_eq!(deliveries[0].bytes, vec![1; 100]);
         assert!(deliveries[0].at_ms <= deliveries[1].at_ms);
         assert_eq!(link.stats().dropped_loss, 0);
@@ -647,7 +647,7 @@ mod tests {
         profile.rtt_ms = 0.0;
         let mut link = LossyLink::new(profile);
         for _ in 0..2_000 {
-            link.transmit(Endpoint::Host, vec![0; 8]);
+            link.transmit(Endpoint::Sender, vec![0; 8]);
         }
         let delivered = link.advance_to(10_000).len();
         assert!(
@@ -663,7 +663,7 @@ mod tests {
         profile.burst_loss = Some(10);
         let mut link = LossyLink::new(profile);
         for _ in 0..500 {
-            link.transmit(Endpoint::Host, vec![0; 8]);
+            link.transmit(Endpoint::Sender, vec![0; 8]);
         }
         let _ = link.advance_to(10_000);
         let stats = link.stats();
@@ -683,7 +683,7 @@ mod tests {
         profile.rtt_ms = 0.0;
         let mut link = LossyLink::new(profile);
         // 1 000 bytes at 1 000 B/s takes 1 s.
-        link.transmit(Endpoint::Host, vec![0; 1_000]);
+        link.transmit(Endpoint::Sender, vec![0; 1_000]);
         let early = link.advance_to(900);
         assert!(early.is_empty());
         let late = link.advance_to(1_100);
@@ -697,8 +697,8 @@ mod tests {
         profile.mtu_bytes = 100;
         // The payload budget admits the MLP framing allowance on top.
         let mut link = LossyLink::new(profile);
-        link.transmit(Endpoint::Host, vec![0; 100 + FRAMING_ALLOWANCE_BYTES + 1]);
-        link.transmit(Endpoint::Host, vec![0; 100 + FRAMING_ALLOWANCE_BYTES]);
+        link.transmit(Endpoint::Sender, vec![0; 100 + FRAMING_ALLOWANCE_BYTES + 1]);
+        link.transmit(Endpoint::Sender, vec![0; 100 + FRAMING_ALLOWANCE_BYTES]);
         let deliveries = link.advance_to(1_000);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(link.stats().dropped_mtu, 1);
@@ -712,20 +712,20 @@ mod tests {
             dur_ms: 100,
         }];
         let mut link = LossyLink::new(profile);
-        link.transmit(Endpoint::Host, vec![0; 8]);
+        link.transmit(Endpoint::Sender, vec![0; 8]);
         assert_eq!(link.advance_to(20).len(), 1);
         // A message whose arrival lands inside the outage is lost ...
         link.advance_to(96);
-        link.transmit(Endpoint::Host, vec![1; 8]);
+        link.transmit(Endpoint::Sender, vec![1; 8]);
         let during = link.advance_to(150);
         assert!(during.is_empty());
         assert_eq!(link.stats().dropped_outage, 1);
         // ... and a message offered during the outage never leaves.
-        link.transmit(Endpoint::Host, vec![2; 8]);
+        link.transmit(Endpoint::Sender, vec![2; 8]);
         assert_eq!(link.stats().dropped_outage, 2);
         // After it, the link works again.
         link.advance_to(200);
-        link.transmit(Endpoint::Host, vec![3; 8]);
+        link.transmit(Endpoint::Sender, vec![3; 8]);
         assert_eq!(link.advance_to(300).len(), 1);
     }
 
@@ -738,7 +738,7 @@ mod tests {
         let run = || {
             let mut link = LossyLink::new(profile.clone());
             for index in 0..50u8 {
-                link.transmit(Endpoint::Host, vec![index; 16]);
+                link.transmit(Endpoint::Sender, vec![index; 16]);
             }
             let deliveries = link.advance_to(10_000);
             (

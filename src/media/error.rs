@@ -143,7 +143,7 @@ pub enum RejectReason {
     AckBadBitmap,
     /// `stale_blocks > applied_block_count`.
     AckBadCount,
-    /// The object was dropped because a newer plan covers its blocks.
+    /// The object was dropped because a newer plan covers its cells.
     SupersededByPlan,
     /// The object was dropped by the bounded in-flight cap.
     InFlightCap,

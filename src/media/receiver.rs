@@ -689,7 +689,7 @@ impl MediaReceiverMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::pdu::{Fragment, FragmentFlags, UpdateMeta, HeaderExt, Priority, tlv};
+    use super::super::pdu::{Fragment, FragmentFlags, HeaderExt, Priority, UpdateMeta, tlv};
     use super::*;
 
     fn receiver(carrier: Carrier) -> MediaReceiverMachine {

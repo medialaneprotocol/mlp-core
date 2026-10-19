@@ -1,8 +1,8 @@
-//! Per-receiver block accounting (MLP spec §7.5, D-7): the convergence engine.
+//! Per-receiver cell accounting (MLP spec §7.5, D-7): the convergence engine.
 //!
-//! One [`BlockAccounting`] per receiver holds the block grid, the per-block
+//! One [`BlockAccounting`] per receiver holds the cell grid, the per-cell
 //! `(update_id, sent_at_ms)` facts, the 64-update ack window and the update ring.
-//! It answers exactly two questions for the scheduler: *which blocks are due
+//! It answers exactly two questions for the scheduler: *which cells are due
 //! for this receiver* and *is this receiver converged*.
 //!
 //! All time is the session-relative millisecond clock the caller injects; the
@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use super::MediaAck;
 
-/// Maximum blocks in a grid (MLP spec §7.5.1).
+/// Maximum cells in a grid (MLP spec §7.5.1).
 pub const MAX_BLOCKS: u32 = 2_048;
-/// Minimum block size in cells (MLP spec §7.5.1).
+/// Minimum cell size in cells (MLP spec §7.5.1).
 pub const MIN_BLOCK_SIZE: u32 = 32;
-/// Maximum block size in cells (MLP spec §7.5.1).
+/// Maximum cell size in cells (MLP spec §7.5.1).
 pub const MAX_BLOCK_SIZE: u32 = 256;
-/// Repair rounds after which a block escalates to P0 (MLP spec §7.5.3).
+/// Repair rounds after which a cell escalates to P0 (MLP spec §7.5.3).
 pub const REPAIR_MAX_ROUNDS: u8 = 4;
 /// The floor of the repair delay on datagram carriers.
 pub const REPAIR_DELAY_DATAGRAM_FLOOR_MS: u64 = 250;
@@ -33,7 +33,7 @@ pub const ACK_RING_FLOOR: usize = 64;
 
 /// A cell rectangle in surface coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct BlockRect {
+pub struct CellRect {
     /// Left edge in cells.
     pub x: u32,
     /// Top edge in cells.
@@ -44,7 +44,7 @@ pub struct BlockRect {
     pub h: u32,
 }
 
-impl BlockRect {
+impl CellRect {
     /// An empty rectangle.
     pub const EMPTY: Self = Self {
         x: 0,
@@ -79,7 +79,7 @@ impl BlockRect {
     }
 }
 
-/// The shared block grid for a geometry.
+/// The shared cell grid for a geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockGrid {
     width: u32,
@@ -91,7 +91,7 @@ pub struct BlockGrid {
 
 impl BlockGrid {
     /// Build the grid with the specification's formula: the smallest power-of-two
-    /// block size at least `sqrt(cells / 2048)`, clamped to `[32, 256]`.
+    /// cell size at least `sqrt(cells / 2048)`, clamped to `[32, 256]`.
     pub fn for_geometry(width: u32, height: u32) -> Self {
         let cells = u64::from(width) * u64::from(height);
         let target = (cells as f64 / f64::from(MAX_BLOCKS)).sqrt().ceil() as u32;
@@ -106,7 +106,7 @@ impl BlockGrid {
         )
     }
 
-    /// Build the grid with an explicit block size.
+    /// Build the grid with an explicit cell size.
     pub fn with_block_size(width: u32, height: u32, cell_size: u32) -> Self {
         let cell_size = cell_size.clamp(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE);
         let cols = width.div_ceil(cell_size).max(1);
@@ -130,7 +130,7 @@ impl BlockGrid {
         self.height
     }
 
-    /// Block size in cells.
+    /// Cell size in cells.
     pub fn cell_size(&self) -> u32 {
         self.cell_size
     }
@@ -145,8 +145,8 @@ impl BlockGrid {
         self.rows
     }
 
-    /// Total blocks (never above [`MAX_BLOCKS`] for a legal geometry).
-    pub fn blocks(&self) -> u32 {
+    /// Total cells (never above [`MAX_BLOCKS`] for a legal geometry).
+    pub fn cells(&self) -> u32 {
         self.cols * self.rows
     }
 
@@ -155,7 +155,7 @@ impl BlockGrid {
         (u64::from(self.width) << 32) ^ (u64::from(self.height) << 8) ^ u64::from(self.cell_size)
     }
 
-    /// The block index of a `(col, row)` pair.
+    /// The cell index of a `(col, row)` pair.
     pub fn index(&self, col: u32, row: u32) -> Option<u32> {
         if col >= self.cols || row >= self.rows {
             return None;
@@ -163,25 +163,25 @@ impl BlockGrid {
         Some(row * self.cols + col)
     }
 
-    /// The `(col, row)` of a block index.
+    /// The `(col, row)` of a cell index.
     pub fn coords(&self, index: u32) -> Option<(u32, u32)> {
-        if index >= self.blocks() {
+        if index >= self.cells() {
             return None;
         }
         Some((index % self.cols, index / self.cols))
     }
 
-    /// The cell rectangle of a block index.
-    pub fn rect(&self, index: u32) -> Option<BlockRect> {
+    /// The cell rectangle of a cell index.
+    pub fn rect(&self, index: u32) -> Option<CellRect> {
         let (col, row) = self.coords(index)?;
         let x = col * self.cell_size;
         let y = row * self.cell_size;
         let w = self.cell_size.min(self.width.saturating_sub(x));
         let h = self.cell_size.min(self.height.saturating_sub(y));
-        Some(BlockRect::new(x, y, w, h))
+        Some(CellRect::new(x, y, w, h))
     }
 
-    /// The block containing a cell, when the cell is on the surface.
+    /// The cell containing a cell, when the cell is on the surface.
     pub fn block_at(&self, x_px: u32, y_px: u32) -> Option<u32> {
         if x_px >= self.width || y_px >= self.height {
             return None;
@@ -189,11 +189,11 @@ impl BlockGrid {
         self.index(x_px / self.cell_size, y_px / self.cell_size)
     }
 
-    /// Every block intersecting a rectangle.
+    /// Every cell intersecting a rectangle.
     ///
     /// Clamps a rectangle that runs off-screen, so a focus rect during a
     /// geometry change cannot panic.
-    pub fn blocks_in_rect(&self, rect: &BlockRect) -> Vec<u32> {
+    pub fn blocks_in_rect(&self, rect: &CellRect) -> Vec<u32> {
         if rect.is_empty() {
             return Vec::new();
         }
@@ -209,48 +209,48 @@ impl BlockGrid {
         let col1 = x1 / self.cell_size;
         let row0 = y0 / self.cell_size;
         let row1 = y1 / self.cell_size;
-        let mut blocks = Vec::new();
+        let mut cells = Vec::new();
         for row in row0..=row1 {
             for col in col0..=col1 {
                 if let Some(index) = self.index(col, row) {
-                    blocks.push(index);
+                    cells.push(index);
                 }
             }
         }
-        blocks
+        cells
     }
 
-    /// The cell rectangle covering a set of block indices.
-    pub fn bounding_rect(&self, blocks: &[u32]) -> BlockRect {
-        let mut rect = BlockRect::EMPTY;
-        for index in blocks {
-            if let Some(block) = self.rect(*index) {
-                rect = rect.union(&block);
+    /// The cell rectangle covering a set of cell indices.
+    pub fn bounding_rect(&self, cells: &[u32]) -> CellRect {
+        let mut rect = CellRect::EMPTY;
+        for index in cells {
+            if let Some(cell) = self.rect(*index) {
+                rect = rect.union(&cell);
             }
         }
         rect
     }
 }
 
-/// Why a block is due for a receiver.
+/// Why a cell is due for a receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DueReason {
-    /// The block is pending, was sent, and the repair delay has passed.
+    /// The cell is pending, was sent, and the repair delay has passed.
     Repair,
-    /// The block passed `repair_max_rounds` repair rounds.
+    /// The cell passed `repair_max_rounds` repair rounds.
     Escalated,
-    /// The block is still due after `2 × repair_delay` past escalation.
+    /// The cell is still due after `2 × repair_delay` past escalation.
     Stuck,
 }
 
-/// A block the scheduler must consider for a receiver.
+/// A cell the scheduler must consider for a receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DueBlock {
-    /// Block index.
+    /// Cell index.
     pub index: u32,
     /// Why it is due.
     pub reason: DueReason,
-    /// Repair rounds this block has accumulated.
+    /// Repair rounds this cell has accumulated.
     pub rounds: u8,
 }
 
@@ -259,11 +259,11 @@ pub struct DueBlock {
 pub struct BlockCounters {
     /// Acks whose update fell out of the ring (conservative re-send).
     pub ack_ring_misses: u64,
-    /// Blocks that were re-sent after the repair delay.
+    /// Cells that were re-sent after the repair delay.
     pub repair_rounds_resent: u64,
-    /// Blocks still due after the escalation ladder.
+    /// Cells still due after the escalation ladder.
     pub repair_stuck_blocks: u64,
-    /// Blocks marked stale by a update-epoch change.
+    /// Cells marked stale by a update-epoch change.
     pub epoch_resets: u64,
     /// Updates the accounting accepted from acks.
     pub applied_frames: u64,
@@ -274,7 +274,7 @@ pub struct BlockCounters {
 pub struct AckOutcome {
     /// Applied updates named by the bitmap.
     pub applied_frames: u32,
-    /// Blocks removed from pending.
+    /// Cells removed from pending.
     pub cleared_blocks: u32,
     /// Whether the ack named a update outside the ring.
     pub ring_miss: bool,
@@ -291,9 +291,9 @@ struct BlockState {
     rounds: u8,
     due_override: bool,
     ever_sent: bool,
-    /// When the block first passed `REPAIR_MAX_ROUNDS`. "Still due after
+    /// When the cell first passed `REPAIR_MAX_ROUNDS`. "Still due after
     /// `2 × repair_delay`" is measured from here, not from the last emission:
-    /// a block that keeps being re-sent every repair delay is exactly the case
+    /// a cell that keeps being re-sent every repair delay is exactly the case
     /// the anchor plan exists for (MLP spec §7.5.3).
     escalated_at_ms: Option<u64>,
 }
@@ -314,7 +314,7 @@ impl BlockState {
 #[derive(Debug, Clone)]
 struct UpdateRecord {
     update_id: u64,
-    blocks: Vec<u32>,
+    cells: Vec<u32>,
 }
 
 /// Accounting configuration; every value is a policy constant of §6.5.
@@ -341,19 +341,19 @@ impl Default for BlockAccountingConfig {
     }
 }
 
-/// One receiver's block accounting.
+/// One receiver's cell accounting.
 #[derive(Debug, Clone)]
 pub struct BlockAccounting {
     grid: BlockGrid,
     config: BlockAccountingConfig,
     pending: Vec<BlockState>,
-    /// Whether a block was ever emitted in this epoch. An epoch change makes
-    /// every such block suspect again (MLP spec §6.1), even when its ack had
+    /// Whether a cell was ever emitted in this epoch. An epoch change makes
+    /// every such cell suspect again (MLP spec §6.1), even when its ack had
     /// already cleared it.
     emitted_any: Vec<bool>,
     ring: VecDeque<UpdateRecord>,
     epoch: u32,
-    last_applied_frame_id: u64,
+    last_applied_update_id: u64,
     last_sent_frame_id: u64,
     last_ack_at_ms: Option<u64>,
     counters: BlockCounters,
@@ -366,11 +366,11 @@ impl BlockAccounting {
         Self {
             grid,
             config,
-            pending: vec![BlockState::fresh(); grid.blocks() as usize],
-            emitted_any: vec![false; grid.blocks() as usize],
+            pending: vec![BlockState::fresh(); grid.cells() as usize],
+            emitted_any: vec![false; grid.cells() as usize],
             ring: VecDeque::new(),
             epoch: 0,
-            last_applied_frame_id: 0,
+            last_applied_update_id: 0,
             last_sent_frame_id: 0,
             last_ack_at_ms: None,
             counters: BlockCounters::default(),
@@ -383,7 +383,7 @@ impl BlockAccounting {
         &self.grid
     }
 
-    /// Change the geometry: every block becomes stale (canvas trust resets).
+    /// Change the geometry: every cell becomes stale (canvas trust resets).
     ///
     /// Returns the previous grid so the caller can count the change.
     pub fn set_geometry(&mut self, grid: BlockGrid) -> BlockGrid {
@@ -392,10 +392,10 @@ impl BlockAccounting {
             return previous;
         }
         self.grid = grid;
-        self.pending = vec![BlockState::fresh(); grid.blocks() as usize];
-        self.emitted_any = vec![false; grid.blocks() as usize];
+        self.pending = vec![BlockState::fresh(); grid.cells() as usize];
+        self.emitted_any = vec![false; grid.cells() as usize];
         self.ring.clear();
-        self.last_applied_frame_id = 0;
+        self.last_applied_update_id = 0;
         self.last_sent_frame_id = 0;
         self.stuck_blocks.clear();
         self.counters.epoch_resets += 1;
@@ -409,7 +409,7 @@ impl BlockAccounting {
 
     /// Set the chain epoch. A change resets canvas trust (MLP spec §6.1).
     ///
-    /// Every block emitted in the previous epoch becomes due again — the
+    /// Every cell emitted in the previous epoch becomes due again — the
     /// receiver's chain may be from a different capture — but nothing is
     /// *cleared*: the cells stay until fresh ones arrive.
     pub fn set_epoch(&mut self, epoch: u32) {
@@ -429,7 +429,7 @@ impl BlockAccounting {
                 };
             }
         }
-        self.last_applied_frame_id = 0;
+        self.last_applied_update_id = 0;
         self.counters.epoch_resets += 1;
     }
 
@@ -450,15 +450,15 @@ impl BlockAccounting {
 
     /// Record that `update_id` was emitted for this receiver.
     ///
-    /// `blocks` are the block indices the update's regions cover; `E` advances
-    /// exactly at these blocks (MLP spec §7.3.3).
-    pub fn mark_emitted(&mut self, update_id: u64, blocks: &[u32], now_ms: u64) {
-        let blocks: Vec<u32> = blocks
+    /// `cells` are the cell indices the update's regions cover; `E` advances
+    /// exactly at these cells (MLP spec §7.3.3).
+    pub fn mark_emitted(&mut self, update_id: u64, cells: &[u32], now_ms: u64) {
+        let cells: Vec<u32> = cells
             .iter()
             .copied()
-            .filter(|index| *index < self.grid.blocks())
+            .filter(|index| *index < self.grid.cells())
             .collect();
-        for index in &blocks {
+        for index in &cells {
             let state = &mut self.pending[*index as usize];
             if state.ever_sent {
                 // A re-emission is a repair round.
@@ -475,7 +475,7 @@ impl BlockAccounting {
             self.emitted_any[*index as usize] = true;
         }
         self.last_sent_frame_id = self.last_sent_frame_id.max(update_id);
-        self.ring.push_back(UpdateRecord { update_id, blocks });
+        self.ring.push_back(UpdateRecord { update_id, cells });
         let ring = self.required_ack_ring();
         self.config.ack_ring = ring;
         while self.ring.len() > ring {
@@ -502,9 +502,9 @@ impl BlockAccounting {
         self.counters.applied_frames += u64::from(outcome.applied_frames);
 
         // A update outside the ring means the sender cannot reconstruct the
-        // coverage: mark every block emitted after the last applied id as due
+        // coverage: mark every cell emitted after the last applied id as due
         // (MLP spec §7.5.2). Correct, at the cost of re-sending.
-        if effective > self.last_applied_frame_id {
+        if effective > self.last_applied_update_id {
             let ring_covers = self
                 .ring
                 .front()
@@ -514,14 +514,14 @@ impl BlockAccounting {
                 outcome.ring_miss = true;
                 self.counters.ack_ring_misses += 1;
                 for state in &mut self.pending {
-                    if state.ever_sent && state.update_id > self.last_applied_frame_id {
+                    if state.ever_sent && state.update_id > self.last_applied_update_id {
                         state.due_override = true;
                     }
                 }
             }
         }
 
-        // A block is acked exactly when the update that last emitted it is
+        // A cell is acked exactly when the update that last emitted it is
         // applied. The design's "updates <= that id" rule leans on codec
         // chaining, which an anchor update does not preserve (it may be applied
         // onto any held state), so the accounting clears the coverage of the
@@ -532,21 +532,21 @@ impl BlockAccounting {
                 .ring
                 .iter()
                 .find(|record| record.update_id == update)
-                .map(|record| record.blocks.clone())
+                .map(|record| record.cells.clone())
             else {
                 // Outside the ring: nothing can be cleared safely.
                 continue;
             };
-            for block in covered {
-                let state = &mut self.pending[block as usize];
+            for cell in covered {
+                let state = &mut self.pending[cell as usize];
                 if state.ever_sent && state.update_id == update {
                     *state = BlockState::fresh();
                     outcome.cleared_blocks += 1;
                 }
             }
         }
-        if effective > self.last_applied_frame_id {
-            self.last_applied_frame_id = effective;
+        if effective > self.last_applied_update_id {
+            self.last_applied_update_id = effective;
         }
         // The stuck set is recomputed from the current truth.
         self.stuck_blocks
@@ -572,7 +572,7 @@ impl BlockAccounting {
         }
     }
 
-    /// Blocks that are due for this receiver, ordered `(reason, index)`.
+    /// Cells that are due for this receiver, ordered `(reason, index)`.
     ///
     /// Fresh changes and background refresh are *not* represented here: they
     /// come from the shared capture diff, not from this receiver's history.
@@ -601,11 +601,11 @@ impl BlockAccounting {
                 rounds: state.rounds,
             });
         }
-        due.sort_by_key(|block| (block.reason, block.index));
+        due.sort_by_key(|cell| (cell.reason, cell.index));
         due
     }
 
-    /// Recompute and return the blocks that are stuck after the ladder.
+    /// Recompute and return the cells that are stuck after the ladder.
     ///
     /// The list is what an anchor plan must cover (MLP spec §7.5.3, §6.6).
     pub fn note_stuck(&mut self, now_ms: u64) -> Vec<u32> {
@@ -616,7 +616,7 @@ impl BlockAccounting {
                 continue;
             }
             // Still unacked `2 × repair_delay` after the escalation: the repair
-            // loop is not converging, so the block belongs in an anchor plan.
+            // loop is not converging, so the cell belongs in an anchor plan.
             let escalated = state.escalated_at_ms.unwrap_or(state.sent_at_ms);
             if now_ms.saturating_sub(escalated) >= 2 * repair_delay {
                 stuck.push(index as u32);
@@ -630,7 +630,7 @@ impl BlockAccounting {
         stuck
     }
 
-    /// Blocks the ladder escalated to P0.
+    /// Cells the ladder escalated to P0.
     pub fn escalated_blocks(&self) -> Vec<u32> {
         self.pending
             .iter()
@@ -640,8 +640,8 @@ impl BlockAccounting {
             .collect()
     }
 
-    /// Blocks that are pending (sent and not acked).
-    pub fn pending_blocks(&self) -> Vec<u32> {
+    /// Cells that are pending (sent and not acked).
+    pub fn pending_cells(&self) -> Vec<u32> {
         self.pending
             .iter()
             .enumerate()
@@ -650,25 +650,25 @@ impl BlockAccounting {
             .collect()
     }
 
-    /// The number of pending blocks.
+    /// The number of pending cells.
     pub fn pending_count(&self) -> u32 {
         self.pending.iter().filter(|state| state.ever_sent).count() as u32
     }
 
     /// The pending fraction, for `mlp_stale_fraction`.
     pub fn stale_fraction(&self) -> f64 {
-        f64::from(self.pending_count()) / f64::from(self.grid.blocks().max(1))
+        f64::from(self.pending_count()) / f64::from(self.grid.cells().max(1))
     }
 
     /// Convergence: `pending = ∅` and the last update is applied.
     pub fn converged(&self) -> bool {
         self.pending.iter().all(|state| !state.ever_sent)
-            && self.last_applied_frame_id >= self.last_sent_frame_id
+            && self.last_applied_update_id >= self.last_sent_frame_id
     }
 
     /// The last update id the receiver acked as applied.
-    pub fn last_applied_frame_id(&self) -> u64 {
-        self.last_applied_frame_id
+    pub fn last_applied_update_id(&self) -> u64 {
+        self.last_applied_update_id
     }
 
     /// The last update id this sender emitted for the receiver.
@@ -699,9 +699,9 @@ impl BlockAccounting {
         self.counters
     }
 
-    /// The anchor threshold for this grid: `max(16, blocks / 4)`.
+    /// The anchor threshold for this grid: `max(16, cells / 4)`.
     pub fn anchor_threshold(&self) -> u32 {
-        (self.grid.blocks() / 4).max(16)
+        (self.grid.cells() / 4).max(16)
     }
 
     /// Whether the pending set has crossed the anchor threshold.
@@ -714,12 +714,12 @@ impl BlockAccounting {
         self.ring.iter().map(|record| record.update_id)
     }
 
-    /// The blocks the ring attributes to a update id, when known.
+    /// The cells the ring attributes to a update id, when known.
     pub fn update_blocks(&self, update_id: u64) -> Option<&[u32]> {
         self.ring
             .iter()
             .find(|record| record.update_id == update_id)
-            .map(|record| record.blocks.as_slice())
+            .map(|record| record.cells.as_slice())
     }
 
     /// Forget everything (park eviction, fresh media session).
@@ -729,7 +729,7 @@ impl BlockAccounting {
         }
         self.emitted_any.iter_mut().for_each(|flag| *flag = false);
         self.ring.clear();
-        self.last_applied_frame_id = 0;
+        self.last_applied_update_id = 0;
         self.last_sent_frame_id = 0;
         self.last_ack_at_ms = None;
         self.stuck_blocks.clear();
@@ -763,16 +763,16 @@ mod tests {
 
     #[test]
     fn grid_formula_matches_the_design() {
-        // 1080p: sqrt(2 073 600 / 2 048) ≈ 31.8 ⇒ 32 px, 60 × 34 = 2040 blocks.
+        // 1080p: sqrt(2 073 600 / 2 048) ≈ 31.8 ⇒ 32 px, 60 × 34 = 2040 cells.
         let grid = BlockGrid::for_geometry(1920, 1080);
         assert_eq!(grid.cell_size(), 32);
         assert_eq!(grid.cols(), 60);
         assert_eq!(grid.rows(), 34);
-        assert_eq!(grid.blocks(), 2040);
-        assert!(grid.blocks() <= MAX_BLOCKS);
-        // The design's documented example grid: 64 px ⇒ 510 blocks at 1080p.
+        assert_eq!(grid.cells(), 2040);
+        assert!(grid.cells() <= MAX_BLOCKS);
+        // The design's documented example grid: 64 px ⇒ 510 cells at 1080p.
         let coarse = BlockGrid::with_block_size(1920, 1080, 64);
-        assert_eq!(coarse.blocks(), 510);
+        assert_eq!(coarse.cells(), 510);
     }
 
     #[test]
@@ -781,13 +781,13 @@ mod tests {
         assert_eq!(tiny.cell_size(), MIN_BLOCK_SIZE);
         let big = BlockGrid::for_geometry(4_096, 4_096);
         assert_eq!(big.cell_size(), 128);
-        assert!(big.blocks() <= MAX_BLOCKS);
+        assert!(big.cells() <= MAX_BLOCKS);
         // The 256 px clamp is the hard bound: a geometry that would need
-        // larger blocks saturates it (and the 2048-block budget with it, so
+        // larger cells saturates it (and the 2048-cell budget with it, so
         // the driver must downscale before encoding).
         let beyond = BlockGrid::for_geometry(12_288, 12_288);
         assert_eq!(beyond.cell_size(), MAX_BLOCK_SIZE);
-        assert!(beyond.blocks() > MAX_BLOCKS, "documented saturation");
+        assert!(beyond.cells() > MAX_BLOCKS, "documented saturation");
     }
 
     #[test]
@@ -795,10 +795,10 @@ mod tests {
         let grid = BlockGrid::with_block_size(100, 60, 32);
         assert_eq!(grid.cols(), 4);
         assert_eq!(grid.rows(), 2);
-        assert_eq!(grid.blocks(), 8);
+        assert_eq!(grid.cells(), 8);
         assert_eq!(grid.index(3, 1), Some(7));
         assert_eq!(grid.coords(7), Some((3, 1)));
-        assert_eq!(grid.rect(7), Some(BlockRect::new(96, 32, 4, 28)));
+        assert_eq!(grid.rect(7), Some(CellRect::new(96, 32, 4, 28)));
         assert_eq!(grid.block_at(0, 0), Some(0));
         assert_eq!(grid.block_at(99, 59), Some(7));
         assert_eq!(grid.block_at(200, 10), None);
@@ -808,12 +808,12 @@ mod tests {
     #[test]
     fn blocks_in_rect_covers_the_rectangle() {
         let grid = BlockGrid::with_block_size(128, 128, 32);
-        let blocks = grid.blocks_in_rect(&BlockRect::new(0, 0, 64, 64));
-        assert_eq!(blocks, vec![0, 1, 4, 5]);
-        let clamped = grid.blocks_in_rect(&BlockRect::new(120, 120, 500, 500));
+        let cells = grid.blocks_in_rect(&CellRect::new(0, 0, 64, 64));
+        assert_eq!(cells, vec![0, 1, 4, 5]);
+        let clamped = grid.blocks_in_rect(&CellRect::new(120, 120, 500, 500));
         assert_eq!(clamped, vec![15]);
-        assert!(grid.blocks_in_rect(&BlockRect::EMPTY).is_empty());
-        assert_eq!(grid.bounding_rect(&[0, 5]), BlockRect::new(0, 0, 64, 64));
+        assert!(grid.blocks_in_rect(&CellRect::EMPTY).is_empty());
+        assert_eq!(grid.bounding_rect(&[0, 5]), CellRect::new(0, 0, 64, 64));
     }
 
     #[test]
@@ -869,7 +869,7 @@ mod tests {
         accounting.mark_emitted(1, &[0], now);
         for round in 2..=6 {
             now += 300;
-            // The block is due each round and is re-emitted: the ladder counts.
+            // The cell is due each round and is re-emitted: the ladder counts.
             accounting.mark_emitted(round, &[0], now);
         }
         let due = accounting.due_blocks(now + 400);
@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(accounting.escalated_blocks(), vec![0]);
         assert!(
             !accounting.needs_anchor(),
-            "one block is below the threshold"
+            "one cell is below the threshold"
         );
         assert!(
             accounting.counters().repair_rounds_resent >= 5,
@@ -928,7 +928,7 @@ mod tests {
         assert!(!accounting.converged());
         let due = accounting.due_blocks(0);
         assert_eq!(due.len(), 2, "everything sent is due again");
-        assert_eq!(accounting.last_applied_frame_id(), 0);
+        assert_eq!(accounting.last_applied_update_id(), 0);
     }
 
     #[test]
@@ -954,7 +954,7 @@ mod tests {
         assert_eq!(accounting.pending_count(), 1);
         accounting.apply_ack(&ack(2, 0b1), 30);
         assert!(accounting.converged());
-        assert_eq!(accounting.last_applied_frame_id(), 2);
+        assert_eq!(accounting.last_applied_update_id(), 2);
         assert_eq!(accounting.last_sent_frame_id(), 2);
     }
 
@@ -983,9 +983,9 @@ mod tests {
     fn geometry_change_resets_everything() {
         let mut accounting = accounting(200, 200, false);
         accounting.mark_emitted(1, &[0, 1], 0);
-        let blocks_before = accounting.grid().blocks();
+        let blocks_before = accounting.grid().cells();
         let previous = accounting.set_geometry(BlockGrid::with_block_size(640, 480, 64));
-        assert_eq!(previous.blocks(), blocks_before);
+        assert_eq!(previous.cells(), blocks_before);
         assert_eq!(accounting.pending_count(), 0);
         assert_eq!(accounting.last_sent_frame_id(), 0);
         assert_eq!(accounting.counters().epoch_resets, 1);
@@ -1010,7 +1010,7 @@ mod tests {
     fn stale_fraction_tracks_the_pending_share() {
         let mut accounting = accounting(200, 200, false);
         assert_eq!(accounting.stale_fraction(), 0.0);
-        let all: Vec<u32> = (0..accounting.grid().blocks()).collect();
+        let all: Vec<u32> = (0..accounting.grid().cells()).collect();
         accounting.mark_emitted(1, &all, 0);
         assert_eq!(accounting.stale_fraction(), 1.0);
         assert!(accounting.needs_anchor());
@@ -1018,23 +1018,23 @@ mod tests {
 
     #[test]
     fn convergence_property_under_random_acks() {
-        // Every block emitted is eventually acked; a converged receiver can only
+        // Every cell emitted is eventually acked; a converged receiver can only
         // be observed when the accounting agrees (INV-2's sender-side half).
         let mut accounting = accounting(320, 200, false);
         let grid = *accounting.grid();
         let mut now = 0u64;
         let mut update = 0u64;
         for cycle in 0..40u32 {
-            let blocks: Vec<u32> = (0..grid.blocks())
+            let cells: Vec<u32> = (0..grid.cells())
                 .filter(|index| (index + cycle) % 3 == 0)
                 .collect();
             update += 1;
-            accounting.mark_emitted(update, &blocks, now);
+            accounting.mark_emitted(update, &cells, now);
             now += 40;
             let outcome = accounting.apply_ack(&ack(update, 0b1), now);
             if outcome.converged {
                 assert_eq!(accounting.pending_count(), 0);
-                assert!(accounting.last_applied_frame_id() >= accounting.last_sent_frame_id());
+                assert!(accounting.last_applied_update_id() >= accounting.last_sent_frame_id());
             }
         }
     }

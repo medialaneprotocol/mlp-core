@@ -1,5 +1,5 @@
-//! Lane lifecycle, honest states and the capture/encode policy (MLP spec §7.7,
-//! §7.5, §15.2).
+//! Lane lifecycle, honest states and the capture/encode policy (MLP spec §7.5,
+//! §6.7, §7.5, §12.2).
 //!
 //! Two things live here: the authoritative lane state the sender reports
 //! (`MediaLaneState.state`, values 0..9) and the policy decisions a driver
@@ -178,7 +178,10 @@ impl MediaUnsupportedReason {
     }
 
     /// Parse the wire string.
-    pub fn from_str(value: &str) -> Option<Self> {
+    ///
+    /// Named `parse` rather than `from_str` so it is not mistaken for
+    /// `std::str::FromStr::from_str`, which returns a `Result`.
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "protocol" => Some(Self::Protocol),
             "disabled_by_policy" => Some(Self::DisabledByPolicy),
@@ -203,7 +206,7 @@ pub struct LaneEvidence {
     pub parked: bool,
     /// Whether accounting says the receiver is converged.
     pub converged: bool,
-    /// The pending block fraction (`0.0..=1.0`).
+    /// The pending cell fraction (`0.0..=1.0`).
     pub pending_fraction: f64,
     /// Session-relative ms of the last ack, when any.
     pub last_ack_ms: Option<u64>,
@@ -493,8 +496,8 @@ impl CapturePolicy {
     }
 }
 
-/// Deployment policy values the drivers obtain from configuration (design
-/// §15.2). This struct carries the *decisions*, not the environment reads.
+/// Deployment policy values the drivers obtain from configuration (MLP spec
+/// §12.2). This struct carries the *decisions*, not the environment reads.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MediaLanePolicy {
     /// the lane-enable switch.
@@ -542,7 +545,7 @@ impl MediaLanePolicy {
     /// Whether anchors may be applied onto any held state.
     ///
     /// With strict-chaining mode the sender keeps strict chaining and only
-    /// uses anchors on an epoch change (MLP spec §13).
+    /// uses anchors on an epoch change (MLP spec §12.2).
     pub fn anchors_on_any_state(&self) -> bool {
         self.patch_mode
     }
@@ -581,12 +584,9 @@ mod tests {
             MediaUnsupportedReason::DisabledByPolicy,
             MediaUnsupportedReason::NoHostCapability,
         ] {
-            assert_eq!(
-                MediaUnsupportedReason::from_str(reason.as_str()),
-                Some(reason)
-            );
+            assert_eq!(MediaUnsupportedReason::parse(reason.as_str()), Some(reason));
         }
-        assert_eq!(MediaUnsupportedReason::from_str("nonsense"), None);
+        assert_eq!(MediaUnsupportedReason::parse("nonsense"), None);
     }
 
     #[test]
@@ -697,7 +697,10 @@ mod tests {
             ..LaneEvidence::default()
         };
         assert_eq!(lane.update(&parked), Some(MediaLaneStateKind::Parked));
-        assert!(!lane.state().emits_media(), "a parked lane emits no updates");
+        assert!(
+            !lane.state().emits_media(),
+            "a parked lane emits no updates"
+        );
     }
 
     #[test]

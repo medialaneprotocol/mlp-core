@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::error::RejectReason;
-use super::pdu::{Carrier, Fragment, FragmentClass, FragmentFlags, UpdateMeta, HeaderExt, Priority};
+use super::pdu::{
+    Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, UpdateMeta,
+};
 
 /// Bound on simultaneously open objects per lane (MLP spec §5.4).
 pub const MAX_OPEN_OBJECTS: usize = 4;
@@ -163,10 +165,8 @@ impl OpenObject {
 
     fn into_object(self, completed_at: Instant) -> MediaObject {
         let mut payload = Vec::with_capacity(self.bytes);
-        for part in self.parts.into_iter() {
-            if let Some(bytes) = part {
-                payload.extend_from_slice(&bytes);
-            }
+        for bytes in self.parts.into_iter().flatten() {
+            payload.extend_from_slice(&bytes);
         }
         MediaObject {
             class: self.class,
@@ -510,7 +510,7 @@ impl ObjectAssembler {
 
     /// The `tlv::BLOCK_COUNT` hint of an object, when present.
     pub fn block_count_hint(object: &MediaObject) -> Option<u32> {
-        object.ext.block_count()
+        object.ext.cell_count()
     }
 
     /// The carrier a fragment claims to be for, as a debug aid.
@@ -604,7 +604,7 @@ mod tests {
             AssemblyOutcome::Object(object) => {
                 assert_eq!(object.object_id, 7);
                 assert_eq!(object.payload, vec![1, 2, 2, 3, 3]);
-                assert!(object.is_anchor() == false);
+                assert!(!object.is_anchor());
             }
             other => panic!("expected a complete object, got {other:?}"),
         }
@@ -636,8 +636,10 @@ mod tests {
 
     #[test]
     fn dedupe_window_is_bounded() {
-        let mut config = AssemblyConfig::default();
-        config.dedup_window = 8;
+        let config = AssemblyConfig {
+            dedup_window: 8,
+            ..AssemblyConfig::default()
+        };
         let mut assembler = ObjectAssembler::new(config);
         let now = Instant::now();
         for object_id in 0..32u32 {
@@ -702,8 +704,10 @@ mod tests {
 
     #[test]
     fn open_object_budget_evicts_the_oldest() {
-        let mut config = AssemblyConfig::default();
-        config.max_open_objects = 2;
+        let config = AssemblyConfig {
+            max_open_objects: 2,
+            ..AssemblyConfig::default()
+        };
         let mut assembler = ObjectAssembler::new(config);
         let now = Instant::now();
         assembler.accept(fragment(1, 0, 2, false, vec![1], HeaderExt::new()), 0, now);
@@ -719,8 +723,10 @@ mod tests {
 
     #[test]
     fn assembly_bytes_budget_is_honoured() {
-        let mut config = AssemblyConfig::default();
-        config.max_assembly_bytes = 100;
+        let config = AssemblyConfig {
+            max_assembly_bytes: 100,
+            ..AssemblyConfig::default()
+        };
         let mut assembler = ObjectAssembler::new(config);
         let now = Instant::now();
         assembler.accept(

@@ -1,20 +1,20 @@
 //! Priority scheduling, update timing and anchor plans (MLP spec §7.3, §6.6, D-19).
 //!
-//! The scheduler answers one question per capture cycle: *which blocks should
+//! The scheduler answers one question per capture cycle: *which cells should
 //! the next update for this receiver cover, under the current budget?* It owns
 //! the priority bands P0–P3, the input pulse window, the idle-update cadence
 //! and the anchor-plan machinery.
 
 use serde::{Deserialize, Serialize};
 
-use super::blocks::{BlockGrid, BlockRect, DueBlock, DueReason};
+use super::cells::{BlockGrid, CellRect, DueBlock, DueReason};
 
 /// The design's priority bands (MLP spec §7.3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PriorityBand {
-    /// P0 — input/focus region and blocks pending beyond the ladder (≥50 %).
+    /// P0 — input/focus region and cells pending beyond the ladder (≥50 %).
     P0,
-    /// P1 — pending blocks (sent, unacked, due).
+    /// P1 — pending cells (sent, unacked, due).
     P1,
     /// P2 — fresh changes (`E ≠ capture`).
     P2,
@@ -53,7 +53,7 @@ pub enum UpdateKind {
     Idle,
     /// An immediate update carrying the input pulse region.
     Pulse,
-    /// A update sent to repair blocks (chained unless an anchor plan).
+    /// A update sent to repair cells (chained unless an anchor plan).
     Repair,
 }
 
@@ -130,11 +130,11 @@ impl UpdateBudget {
 /// What the scheduler is asked to consider for one receiver.
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduleRequest<'a> {
-    /// Blocks due from block accounting (P0/P1).
+    /// Cells due from cell accounting (P0/P1).
     pub due: &'a [DueBlock],
-    /// Blocks whose cells changed since the emitted state (P2).
+    /// Cells whose cells changed since the emitted state (P2).
     pub fresh: &'a [u32],
-    /// Blocks never sent this epoch (P3).
+    /// Cells never sent this epoch (P3).
     pub refresh: &'a [u32],
     /// The budget for this update.
     pub budget: UpdateBudget,
@@ -145,17 +145,17 @@ pub struct ScheduleRequest<'a> {
 /// The scheduler's decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleDecision {
-    /// Blocks the update must cover, in emission order.
-    pub blocks: Vec<u32>,
+    /// Cells the update must cover, in emission order.
+    pub cells: Vec<u32>,
     /// The highest band in the update (drives the MLP priority field).
     pub band: PriorityBand,
     /// Whether the update is an anchor.
     pub anchor: bool,
     /// The update kind.
     pub kind: UpdateKind,
-    /// Estimated payload bytes (an upper bound from the block cost).
+    /// Estimated payload bytes (an upper bound from the cell cost).
     pub estimated_bytes: u32,
-    /// Blocks that were due but did not fit.
+    /// Cells that were due but did not fit.
     pub deferred: u32,
     /// The plan this update belongs to, when a plan is active.
     pub plan_id: Option<u32>,
@@ -164,12 +164,12 @@ pub struct ScheduleDecision {
 impl ScheduleDecision {
     /// Whether the update would carry no cells and is therefore an idle update.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.cells.is_empty()
     }
 
-    /// The bounding rectangle of the update's blocks.
-    pub fn rect(&self, grid: &BlockGrid) -> BlockRect {
-        grid.bounding_rect(&self.blocks)
+    /// The bounding rectangle of the update's cells.
+    pub fn rect(&self, grid: &BlockGrid) -> CellRect {
+        grid.bounding_rect(&self.cells)
     }
 }
 
@@ -182,7 +182,7 @@ pub enum PlanStartReason {
     Epoch,
     /// The geometry changed.
     Geometry,
-    /// Repair blocks stayed stuck after the escalation ladder.
+    /// Repair cells stayed stuck after the escalation ladder.
     Stuck,
     /// The receiver resumed onto the parked state.
     Resume,
@@ -204,7 +204,7 @@ impl PlanStartReason {
 /// Plan policy constants (MLP spec §7.6).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlanConfig {
-    /// `anchor_threshold = max(16, blocks / 4)`.
+    /// `anchor_threshold = max(16, cells / 4)`.
     pub anchor_threshold: u32,
     /// `RESET_MIN_INTERVAL_MS`, per receiver: plans are rate-limited per receiver.
     pub min_interval_ms: u64,
@@ -238,7 +238,7 @@ impl PlanConfig {
 #[derive(Debug, Clone)]
 struct AnchorPlanState {
     plan_id: u32,
-    blocks: Vec<u32>,
+    cells: Vec<u32>,
     next_index: usize,
     updates_emitted: u32,
     started_at_ms: u64,
@@ -250,12 +250,12 @@ struct AnchorPlanState {
 ///
 /// A band is the update that carries it, and a pull alone must never advance the
 /// plan: when the update is refused (in-flight cap, rate limit, oversize) or
-/// preempted by a pulse, [`PlanManager::unclaim`] returns the unpainted blocks
+/// preempted by a pulse, [`PlanManager::unclaim`] returns the unpainted cells
 /// to the plan instead of losing them.
 #[derive(Debug, Clone)]
 struct PulledBand {
     plan_id: u32,
-    blocks: Vec<u32>,
+    cells: Vec<u32>,
     updates_emitted: u32,
     started_at_ms: u64,
     reason: PlanStartReason,
@@ -311,7 +311,7 @@ impl PlanManager {
         self.active.as_ref().map(|plan| {
             (
                 plan.plan_id,
-                (plan.blocks.len() - plan.next_index) as u32,
+                (plan.cells.len() - plan.next_index) as u32,
                 plan.reason,
             )
         })
@@ -322,19 +322,19 @@ impl PlanManager {
         self.active.is_some()
     }
 
-    /// Start a plan covering `blocks`.
+    /// Start a plan covering `cells`.
     ///
     /// Returns `None` when the per-receiver rate limit refuses it, when the plan
     /// would be empty, or when an identical plan is already running.
     pub fn start(
         &mut self,
         reason: PlanStartReason,
-        mut blocks: Vec<u32>,
+        mut cells: Vec<u32>,
         now_ms: u64,
     ) -> Option<u32> {
-        blocks.sort_unstable();
-        blocks.dedup();
-        if blocks.is_empty() {
+        cells.sort_unstable();
+        cells.dedup();
+        if cells.is_empty() {
             return None;
         }
         if let Some(last) = self.last_started_at_ms
@@ -346,7 +346,7 @@ impl PlanManager {
         self.next_plan_id = self.next_plan_id.wrapping_add(1).max(1);
         self.active = Some(AnchorPlanState {
             plan_id,
-            blocks,
+            cells,
             next_index: 0,
             updates_emitted: 0,
             started_at_ms: now_ms,
@@ -372,26 +372,26 @@ impl PlanManager {
 
     /// Take the next band of the active plan.
     ///
-    /// Each band is a contiguous run of the plan's block list, bounded by
+    /// Each band is a contiguous run of the plan's cell list, bounded by
     /// `budget_bytes` and `max_object_bytes` (MLP spec §7.6). The pull is
     /// remembered in [`Self::unclaim`]'s terms: the band is consumed only by
     /// the update that paints it.
-    pub fn next_band(&mut self, budget_bytes: u32, block_bytes: u32) -> Option<PlanBand> {
+    pub fn next_band(&mut self, budget_bytes: u32, cell_bytes: u32) -> Option<PlanBand> {
         let plan = self.active.as_mut()?;
-        if plan.next_index >= plan.blocks.len() {
+        if plan.next_index >= plan.cells.len() {
             return None;
         }
-        let block_bytes = block_bytes.max(1);
-        let max_blocks = (budget_bytes / block_bytes).max(1) as usize;
-        let remaining = plan.blocks.len() - plan.next_index;
+        let cell_bytes = cell_bytes.max(1);
+        let max_blocks = (budget_bytes / cell_bytes).max(1) as usize;
+        let remaining = plan.cells.len() - plan.next_index;
         let take = remaining.min(max_blocks);
-        let blocks = plan.blocks[plan.next_index..plan.next_index + take].to_vec();
+        let cells = plan.cells[plan.next_index..plan.next_index + take].to_vec();
         plan.next_index += take;
         plan.updates_emitted += 1;
-        let remaining_after = (plan.blocks.len() - plan.next_index) as u32;
+        let remaining_after = (plan.cells.len() - plan.next_index) as u32;
         let band = PlanBand {
             plan_id: plan.plan_id,
-            blocks,
+            cells,
             anchor: true,
             remaining_after,
             priority: self.config.priority,
@@ -399,7 +399,7 @@ impl PlanManager {
         };
         let pulled = PulledBand {
             plan_id: band.plan_id,
-            blocks: band.blocks.clone(),
+            cells: band.cells.clone(),
             updates_emitted: band.updates_emitted,
             started_at_ms: plan.started_at_ms,
             reason: plan.reason,
@@ -413,25 +413,25 @@ impl PlanManager {
         Some(band)
     }
 
-    /// Return the blocks of the last pulled band that `painted` did not cover
+    /// Return the cells of the last pulled band that `painted` did not cover
     /// to the front of the plan (T3).
     ///
     /// The pull is a claim on the update to come; this is its settlement. When
     /// the update never happened (refused: in-flight cap, rate limit, oversize)
     /// or painted only part of the band (shrunk to what fit the object cap),
-    /// the unpainted blocks are owed again — in order, at the head of what the
+    /// the unpainted cells are owed again — in order, at the head of what the
     /// plan has left. A band whose pull drained the plan reopens it rather than
-    /// staying completed, so the plan is only ever completed by the blocks it
-    /// painted. Returns whether any block went back to the plan.
+    /// staying completed, so the plan is only ever completed by the cells it
+    /// painted. Returns whether any cell went back to the plan.
     pub fn unclaim(&mut self, painted: &[u32]) -> bool {
         let Some(pulled) = self.last_pulled.take() else {
             return false;
         };
         let owed: Vec<u32> = pulled
-            .blocks
+            .cells
             .iter()
             .copied()
-            .filter(|block| !painted.contains(block))
+            .filter(|cell| !painted.contains(cell))
             .collect();
         if owed.is_empty() {
             // The update painted the whole band: the plan keeps its position.
@@ -443,28 +443,28 @@ impl PlanManager {
         if let Some(plan) = self.active.as_mut()
             && plan.plan_id == pulled.plan_id
         {
-            let consumed = pulled.blocks.len();
+            let consumed = pulled.cells.len();
             if plan.next_index >= consumed
-                && plan.blocks[plan.next_index - consumed..plan.next_index] == pulled.blocks[..]
+                && plan.cells[plan.next_index - consumed..plan.next_index] == pulled.cells[..]
             {
                 let start = plan.next_index - consumed;
-                let rest = plan.blocks.split_off(plan.next_index);
-                plan.blocks.truncate(start);
-                plan.blocks.extend(owed);
+                let rest = plan.cells.split_off(plan.next_index);
+                plan.cells.truncate(start);
+                plan.cells.extend(owed);
                 plan.next_index = start;
-                plan.blocks.extend(rest);
+                plan.cells.extend(rest);
                 return true;
             }
             return false;
         }
         // The pull drained the plan: reopen it. The completion was counted at
         // the pull (the manager reports the drain there), so it is un-counted
-        // here — the plan is not complete until its blocks are painted.
+        // here — the plan is not complete until its cells are painted.
         if pulled.completed_at_pull && self.active.is_none() {
             self.plans_completed -= 1;
             self.active = Some(AnchorPlanState {
                 plan_id: pulled.plan_id,
-                blocks: owed,
+                cells: owed,
                 next_index: 0,
                 updates_emitted: pulled.updates_emitted,
                 started_at_ms: pulled.started_at_ms,
@@ -490,7 +490,7 @@ impl PlanManager {
     /// Whether the active plan has run past its deadline.
     ///
     /// `Some(plan_id)` means the caller must restart the plan with the newest
-    /// block set: freshness beats completeness on a collapsing link.
+    /// cell set: freshness beats completeness on a collapsing link.
     pub fn poll_overdue(&mut self, now_ms: u64) -> Option<u32> {
         let plan = self.active.as_ref()?;
         if now_ms.saturating_sub(plan.started_at_ms) > self.config.deadline_ms() {
@@ -516,11 +516,11 @@ impl PlanManager {
 pub struct PlanBand {
     /// The plan id.
     pub plan_id: u32,
-    /// Blocks the update must cover.
-    pub blocks: Vec<u32>,
+    /// Cells the update must cover.
+    pub cells: Vec<u32>,
     /// Always true: every plan update is an anchor.
     pub anchor: bool,
-    /// Blocks still to send after this band.
+    /// Cells still to send after this band.
     pub remaining_after: u32,
     /// The MLP priority field.
     pub priority: u8,
@@ -531,15 +531,15 @@ pub struct PlanBand {
 /// Scheduler policy constants.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerConfig {
-    /// Estimated *encoded* bytes per block, used to truncate a update to the
+    /// Estimated *encoded* bytes per cell, used to truncate a update to the
     /// budget before the encoder runs.
     ///
-    /// The raw cell size of a block is `block_size² × 2` (8 KiB at 64 px),
+    /// The raw cell size of a cell is `block_size² × 2` (8 KiB at 64 px),
     /// which is the ceiling the encoder must respect; the working estimate is
-    /// far below it because a block is carried as one or two region ops. The
+    /// far below it because a cell is carried as one or two region ops. The
     /// sender pipeline calibrates this from its bench; `0` means "use the raw
     /// ceiling", which is deliberately conservative.
-    pub block_bytes: u32,
+    pub cell_bytes: u32,
     /// `IDLE_FRAME_INTERVAL_MS` floor.
     pub idle_interval_floor_ms: u64,
     /// `IDLE_FRAME_INTERVAL_MS` ceiling.
@@ -559,7 +559,7 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            block_bytes: DEFAULT_BLOCK_BYTES,
+            cell_bytes: DEFAULT_BLOCK_BYTES,
             idle_interval_floor_ms: 1_000,
             idle_interval_ceiling_ms: 3_000,
             pulse_window_floor_ms: 300,
@@ -572,10 +572,10 @@ impl Default for SchedulerConfig {
 }
 
 impl SchedulerConfig {
-    /// Estimated bytes for one block at the given grid.
+    /// Estimated bytes for one cell at the given grid.
     pub fn block_bytes_for(&self, grid: &BlockGrid) -> u32 {
-        if self.block_bytes != 0 {
-            return self.block_bytes;
+        if self.cell_bytes != 0 {
+            return self.cell_bytes;
         }
         // a raw cell is the upper bound of any codec payload.
         let size = grid.cell_size();
@@ -657,9 +657,9 @@ impl Default for UpdateTimer {
     }
 }
 
-/// Working estimate of one block's encoded size, in bytes.
+/// Working estimate of one cell's encoded size, in bytes.
 ///
-/// 512 B/block keeps a update inside the floor budget (8 kbps ⇒ 1 000 B) so the
+/// 512 B/cell keeps a update inside the floor budget (8 kbps ⇒ 1 000 B) so the
 /// scheduler always makes progress; the encoder's own bound is the raw cell
 /// size and the sender rejects anything above `max_object_bytes` (§5.5.1).
 pub const DEFAULT_BLOCK_BYTES: u32 = 512;
@@ -673,7 +673,7 @@ pub const IDLE_FRAME_INTERVAL_CEILING_MS: u64 = 3_000;
 pub struct Scheduler {
     config: SchedulerConfig,
     plans: PlanManager,
-    focus: Option<BlockRect>,
+    focus: Option<CellRect>,
     timer: UpdateTimer,
     last_idle_ms: Option<u64>,
     updates_by_kind: [u64; 5],
@@ -720,7 +720,7 @@ impl Scheduler {
     }
 
     /// Note the input/focus rectangle (P0).
-    pub fn mark_focus(&mut self, rect: BlockRect) {
+    pub fn mark_focus(&mut self, rect: CellRect) {
         self.focus = Some(match self.focus {
             Some(current) => current.union(&rect),
             None => rect,
@@ -728,7 +728,7 @@ impl Scheduler {
     }
 
     /// The current focus rectangle.
-    pub fn focus(&self) -> Option<BlockRect> {
+    pub fn focus(&self) -> Option<CellRect> {
         self.focus
     }
 
@@ -737,7 +737,7 @@ impl Scheduler {
         self.focus = None;
     }
 
-    /// The blocks of the current focus rectangle.
+    /// The cells of the current focus rectangle.
     pub fn focus_blocks(&self, grid: &BlockGrid) -> Vec<u32> {
         self.focus
             .map(|rect| grid.blocks_in_rect(&rect))
@@ -752,9 +752,7 @@ impl Scheduler {
 
     /// The target fps during a pulse: `min(30, max(4, target_fps × 2))`.
     pub fn pulse_fps(&self, target_fps: f64) -> f64 {
-        (target_fps * self.config.pulse_fps_multiplier)
-            .max(4.0)
-            .min(30.0)
+        (target_fps * self.config.pulse_fps_multiplier).clamp(4.0, 30.0)
     }
 
     /// The pulse budget: `min(budget_bytes, max(1 024, pace/8 × 0.25 s))`.
@@ -806,7 +804,7 @@ impl Scheduler {
         self.updates_by_kind
     }
 
-    /// Blocks that were due but deferred in the last decisions.
+    /// Cells that were due but deferred in the last decisions.
     pub fn deferred_total(&self) -> u64 {
         self.deferred_total
     }
@@ -821,14 +819,14 @@ impl Scheduler {
         grid: &BlockGrid,
         now_ms: u64,
     ) -> ScheduleDecision {
-        let block_bytes = self.config.block_bytes_for(grid);
+        let cell_bytes = self.config.block_bytes_for(grid);
         // A running plan owns the update.
-        if let Some(band) = self.plans.next_band(request.budget.bytes, block_bytes) {
-            let estimated = (band.blocks.len() as u32).saturating_mul(block_bytes);
+        if let Some(band) = self.plans.next_band(request.budget.bytes, cell_bytes) {
+            let estimated = (band.cells.len() as u32).saturating_mul(cell_bytes);
             self.on_frame_kind(UpdateKind::Anchor);
             self.timer.on_frame(now_ms);
             return ScheduleDecision {
-                blocks: band.blocks,
+                cells: band.cells,
                 band: PriorityBand::P0,
                 anchor: true,
                 kind: UpdateKind::Anchor,
@@ -841,7 +839,7 @@ impl Scheduler {
         let focus_blocks = self.focus_blocks(grid);
         let mut buckets: [Vec<(PriorityBand, u32)>; 4] =
             [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        // P0: the focus rectangle, then escalated/stuck repair blocks.
+        // P0: the focus rectangle, then escalated/stuck repair cells.
         for index in &focus_blocks {
             buckets[0].push((PriorityBand::P0, *index));
         }
@@ -866,7 +864,7 @@ impl Scheduler {
             bucket.sort_unstable();
             bucket.dedup_by_key(|(_, index)| *index);
         }
-        // A block may appear in two buckets; the highest band wins.
+        // A cell may appear in two buckets; the highest band wins.
         let mut chosen: Vec<(PriorityBand, u32)> = Vec::new();
         let mut seen: Vec<u32> = Vec::new();
         let budget = request.budget.bytes.max(1);
@@ -877,35 +875,35 @@ impl Scheduler {
             if seen.contains(index) {
                 continue;
             }
-            if used + block_bytes > budget {
+            if used + cell_bytes > budget {
                 break;
             }
             chosen.push((*band, *index));
             seen.push(*index);
-            used += block_bytes;
+            used += cell_bytes;
         }
-        for band_index in 1..4 {
-            for (band, index) in &buckets[band_index] {
+        for bucket in buckets.iter().skip(1) {
+            for (band, index) in bucket {
                 if seen.contains(index) {
                     continue;
                 }
-                if used + block_bytes > budget {
+                if used + cell_bytes > budget {
                     break;
                 }
                 chosen.push((*band, *index));
                 seen.push(*index);
-                used += block_bytes;
+                used += cell_bytes;
             }
         }
         chosen.sort_unstable();
-        let blocks: Vec<u32> = chosen.iter().map(|(_, index)| *index).collect();
+        let cells: Vec<u32> = chosen.iter().map(|(_, index)| *index).collect();
         let band = chosen
             .iter()
             .map(|(band, _)| *band)
             .min()
             .unwrap_or(PriorityBand::P2);
-        let has_repair = request.due.iter().any(|due| blocks.contains(&due.index));
-        let kind = if blocks.is_empty() {
+        let has_repair = request.due.iter().any(|due| cells.contains(&due.index));
+        let kind = if cells.is_empty() {
             UpdateKind::Idle
         } else if request.anchor {
             UpdateKind::Anchor
@@ -915,16 +913,16 @@ impl Scheduler {
             UpdateKind::Delta
         };
         let candidate_count = buckets.iter().map(|bucket| bucket.len()).sum::<usize>();
-        let deferred = candidate_count.saturating_sub(blocks.len()) as u32;
+        let deferred = candidate_count.saturating_sub(cells.len()) as u32;
         self.deferred_total += u64::from(deferred);
-        if !blocks.is_empty() {
+        if !cells.is_empty() {
             self.focus = None;
         }
         self.timer.on_frame(now_ms);
         self.on_frame_kind(kind);
         ScheduleDecision {
-            estimated_bytes: (blocks.len() as u32).saturating_mul(block_bytes),
-            blocks,
+            estimated_bytes: (cells.len() as u32).saturating_mul(cell_bytes),
+            cells,
             band,
             anchor: request.anchor || kind == UpdateKind::Anchor,
             kind,
@@ -948,7 +946,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::blocks::BlockGrid;
+    use crate::media::cells::BlockGrid;
 
     fn scheduler() -> Scheduler {
         Scheduler::new(SchedulerConfig::default(), PlanConfig::default())
@@ -969,7 +967,7 @@ mod tests {
         }
     }
 
-    /// A budget with room for many blocks, for ordering assertions.
+    /// A budget with room for many cells, for ordering assertions.
     fn roomy_budget() -> UpdateBudget {
         UpdateBudget {
             bytes: 1_048_576,
@@ -992,7 +990,7 @@ mod tests {
         let grid = BlockGrid::with_block_size(320, 320, 32);
         let fresh: Vec<u32> = vec![1, 2, 3];
         let decision = scheduler.schedule(request(&[], &fresh, &[], roomy_budget()), &grid, 0);
-        assert_eq!(decision.blocks, vec![1, 2, 3]);
+        assert_eq!(decision.cells, vec![1, 2, 3]);
         assert_eq!(decision.band, PriorityBand::P2);
         assert_eq!(decision.kind, UpdateKind::Delta);
         assert!(!decision.anchor);
@@ -1008,13 +1006,15 @@ mod tests {
             ..UpdateBudget::default()
         };
         // Calibrate the truncation estimate to the raw cell ceiling so the
-        // arithmetic is exact: 2 048 bytes per block, 2 KiB of budget.
-        let mut config = SchedulerConfig::default();
-        config.block_bytes = 2_048;
+        // arithmetic is exact: 2 048 bytes per cell, 2 KiB of budget.
+        let config = SchedulerConfig {
+            cell_bytes: 2_048,
+            ..SchedulerConfig::default()
+        };
         let mut scheduler = Scheduler::new(config, PlanConfig::default());
         let fresh: Vec<u32> = (0..40).collect();
         let decision = scheduler.schedule(request(&[], &fresh, &[], budget), &grid, 0);
-        assert_eq!(decision.blocks.len(), 1);
+        assert_eq!(decision.cells.len(), 1);
         assert_eq!(decision.deferred, 39);
         assert!(decision.estimated_bytes <= budget.bytes);
     }
@@ -1029,7 +1029,7 @@ mod tests {
         let decision =
             scheduler.schedule(request(&due, &fresh, &refresh, roomy_budget()), &grid, 0);
         assert_eq!(
-            decision.blocks,
+            decision.cells,
             vec![10, 20, 30],
             "ordered by band, then index"
         );
@@ -1040,11 +1040,11 @@ mod tests {
     fn focus_rect_wins_p0() {
         let mut scheduler = scheduler();
         let grid = BlockGrid::with_block_size(256, 256, 32);
-        scheduler.mark_focus(BlockRect::new(64, 64, 64, 64));
+        scheduler.mark_focus(CellRect::new(64, 64, 64, 64));
         let fresh = [0];
         let decision = scheduler.schedule(request(&[], &fresh, &[], roomy_budget()), &grid, 0);
-        // The focus rectangle covers blocks 18, 19, 26, 27, which come first.
-        assert_eq!(decision.blocks[0..4], [18, 19, 26, 27]);
+        // The focus rectangle covers cells 18, 19, 26, 27, which come first.
+        assert_eq!(decision.cells[0..4], [18, 19, 26, 27]);
         assert_eq!(decision.band, PriorityBand::P0);
         assert!(scheduler.focus().is_none(), "focus consumed by the update");
     }
@@ -1058,7 +1058,7 @@ mod tests {
             due(6, DueReason::Escalated, 5),
         ];
         let decision = scheduler.schedule(request(&due, &[], &[], roomy_budget()), &grid, 0);
-        assert_eq!(decision.blocks, vec![6, 5], "P0 block first");
+        assert_eq!(decision.cells, vec![6, 5], "P0 cell first");
         assert_eq!(decision.band, PriorityBand::P0);
         assert_eq!(decision.kind, UpdateKind::Repair);
     }
@@ -1079,7 +1079,8 @@ mod tests {
     fn an_empty_decision_is_an_idle_frame() {
         let mut scheduler = scheduler();
         let grid = BlockGrid::with_block_size(256, 256, 32);
-        let decision = scheduler.schedule(request(&[], &[], &[], UpdateBudget::default()), &grid, 0);
+        let decision =
+            scheduler.schedule(request(&[], &[], &[], UpdateBudget::default()), &grid, 0);
         assert!(decision.is_empty());
         assert_eq!(decision.kind, UpdateKind::Idle);
         assert_eq!(scheduler.updates_by_kind()[2], 1);
@@ -1088,20 +1089,20 @@ mod tests {
     #[test]
     fn plan_banding_respects_the_budget() {
         let mut plans = PlanManager::new(PlanConfig::default());
-        let blocks: Vec<u32> = (0..100).collect();
+        let cells: Vec<u32> = (0..100).collect();
         let plan_id = plans
-            .start(PlanStartReason::Pending, blocks, 0)
+            .start(PlanStartReason::Pending, cells, 0)
             .expect("plan");
         assert_eq!(
             plans.active(),
             Some((plan_id, 100, PlanStartReason::Pending))
         );
         let band = plans.next_band(4_096, 2_048).expect("band");
-        assert_eq!(band.blocks, vec![0, 1]);
+        assert_eq!(band.cells, vec![0, 1]);
         assert_eq!(band.remaining_after, 98);
         assert!(band.anchor);
         let huge = plans.next_band(1_048_576, 2_048).expect("band");
-        assert_eq!(huge.blocks.len(), 98);
+        assert_eq!(huge.cells.len(), 98);
         assert_eq!(plans.active(), None, "plan completes when drained");
         let (started, completed, overdue) = plans.counters();
         assert_eq!((started, completed, overdue), (1, 1, 0));
@@ -1116,19 +1117,19 @@ mod tests {
         // The update never happened (refused): the whole band is owed again,
         // at the front, and nothing was consumed.
         let band = plans.next_band(4_096, 2_048).expect("band");
-        assert_eq!(band.blocks, vec![0, 1]);
+        assert_eq!(band.cells, vec![0, 1]);
         assert!(plans.unclaim(&[]), "an unpainted band comes back");
         assert_eq!(
             plans.active().map(|(_, remaining, _)| remaining),
             Some(10),
-            "block for block"
+            "cell for cell"
         );
         let again = plans.next_band(4_096, 2_048).expect("band");
-        assert_eq!(again.blocks, vec![0, 1], "the same band is pulled again");
-        // A update shrunk to a partial claim owes the blocks it did not paint.
-        assert!(plans.unclaim(&[0]), "block 1 was not painted");
+        assert_eq!(again.cells, vec![0, 1], "the same band is pulled again");
+        // A update shrunk to a partial claim owes the cells it did not paint.
+        assert!(plans.unclaim(&[0]), "cell 1 was not painted");
         let rest = plans.next_band(4_096, 2_048).expect("band");
-        assert_eq!(rest.blocks, vec![1, 2], "the owed block leads the band");
+        assert_eq!(rest.cells, vec![1, 2], "the owed cell leads the band");
         // A fully painted band is consumed by its update.
         assert!(!plans.unclaim(&[1, 2]));
         assert_eq!(plans.active().map(|(_, remaining, _)| remaining), Some(7));
@@ -1144,7 +1145,7 @@ mod tests {
             .start(PlanStartReason::Pending, vec![1, 2], 0)
             .expect("plan");
         let band = plans.next_band(4_096, 2_048).expect("the whole plan");
-        assert_eq!(band.blocks, vec![1, 2]);
+        assert_eq!(band.cells, vec![1, 2]);
         assert_eq!(band.remaining_after, 0);
         assert!(!plans.is_active(), "the pull drained the plan");
         assert_eq!(plans.counters().1, 1, "complete at the pull, manager-side");
@@ -1155,7 +1156,7 @@ mod tests {
         assert_eq!(plans.active().map(|(_, remaining, _)| remaining), Some(2));
         // Painting the reopened band completes the plan for real.
         let band = plans.next_band(4_096, 2_048).expect("the reopened band");
-        assert_eq!(band.blocks, vec![1, 2]);
+        assert_eq!(band.cells, vec![1, 2]);
         assert!(!plans.unclaim(&[1, 2]));
         assert_eq!(plans.counters(), (1, 1, 0));
     }
@@ -1186,7 +1187,7 @@ mod tests {
         let plans = PlanManager::new(PlanConfig::default());
         assert!(!plans.should_start_for_pending(16, 0, 0));
         assert!(plans.should_start_for_pending(17, 0, 0), "above threshold");
-        assert!(plans.should_start_for_pending(0, 1, 0), "stuck block");
+        assert!(plans.should_start_for_pending(0, 1, 0), "stuck cell");
     }
 
     #[test]
@@ -1230,7 +1231,7 @@ mod tests {
         let fresh = [40];
         let decision = scheduler.schedule(request(&[], &fresh, &[], roomy_budget()), &grid, 0);
         assert_eq!(decision.plan_id, Some(plan_id));
-        assert_eq!(decision.blocks, vec![1, 2, 3]);
+        assert_eq!(decision.cells, vec![1, 2, 3]);
         assert_eq!(decision.kind, UpdateKind::Anchor);
     }
 

@@ -74,7 +74,7 @@ pub mod tlv {
     pub const PATH_HINT: u8 = 0x0C;
     /// `u64` — input object sequence.
     pub const INPUT_SEQ: u8 = 0x0D;
-    /// `u32` — the sender's block grid size for the update's geometry.
+    /// `u32` — the sender's cell grid size for the update's geometry.
     pub const BLOCK_COUNT: u8 = 0x0E;
     /// `u16` — measured processing cost reported by a hop.
     pub const COST_MS: u8 = 0x0F;
@@ -642,7 +642,7 @@ impl HeaderExt {
     }
 
     /// The `BLOCK_COUNT` value.
-    pub fn block_count(&self) -> Option<u32> {
+    pub fn cell_count(&self) -> Option<u32> {
         self.get_u32(tlv::BLOCK_COUNT)
     }
 

@@ -3,7 +3,7 @@
 //! This module is the single home of media-lane *policy*: the byte-level PDU
 //! codec ([`pdu`]), object assembly ([`object`]), the bandwidth estimator
 //! ([`bwe`]), the token-bucket pacer ([`pacer`]), the priority scheduler
-//! ([`scheduler`]), per-receiver block accounting and convergence ([`blocks`]),
+//! ([`scheduler`]), per-receiver cell accounting and convergence ([`cells`]),
 //! the resume/parking machinery ([`resume`]), the input path ([`input`]) and
 //! the lifecycle vocabulary ([`lifecycle`]). The two full-duplex machines are
 //! [`sender::MediaSenderMachine`] and [`receiver::MediaReceiverMachine`].
@@ -19,8 +19,8 @@
 //! them dependency-free is what lets the deterministic simulator in
 //! [`crate::testing`] exercise every decision without a runtime.
 
-pub mod blocks;
 pub mod bwe;
+pub mod cells;
 pub mod error;
 pub mod input;
 pub mod lifecycle;
@@ -37,13 +37,13 @@ pub use error::{MediaErrorCode, RejectReason};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
 pub use pacer::{AcquireResult, MediaPacer, PacerConfig, TokenBucket};
 pub use pdu::{
-    Carrier, Fragment, FragmentClass, FragmentFlags, FragmentHeader, UpdateMeta, HeaderExt,
-    Priority, TrafficClass,
+    Carrier, Fragment, FragmentClass, FragmentFlags, FragmentHeader, HeaderExt, Priority,
+    TrafficClass, UpdateMeta,
 };
 pub use receiver::{MediaReceiveEvent, MediaReceiverConfig, MediaReceiverMachine, ReceiverStats};
 pub use sender::{
-    EnqueueOutcome, UpdateRequest, MediaSenderConfig, MediaSenderEvent, MediaSenderMachine,
-    SenderStats,
+    EnqueueOutcome, MediaSenderConfig, MediaSenderEvent, MediaSenderMachine, SenderStats,
+    UpdateRequest,
 };
 
 use serde::{Deserialize, Serialize};
@@ -70,14 +70,17 @@ pub mod capability {
 }
 
 /// Hop identifiers for `MediaHopReport` (MLP spec §6.2).
+///
+/// The numbers are extensible: a hop that is not one of these reports
+/// itself as an unknown hop rather than borrowing another's number.
 pub mod hop {
-    /// The intermediary hop.
-    pub const RELAY: u32 = 1;
-    /// The edge hop.
-    pub const GATEWAY: u32 = 2;
-    /// The datagram carrier hop (S2).
+    /// The first intermediary hop.
+    pub const FIRST: u32 = 1;
+    /// The second intermediary hop, the edge.
+    pub const SECOND: u32 = 2;
+    /// The datagram carrier hop.
     pub const DC: u32 = 3;
-    /// The TURN hop (S2).
+    /// The relay hop.
     pub const TURN: u32 = 4;
 }
 
@@ -183,12 +186,12 @@ pub struct MediaHello {
     pub session_id: String,
     /// The sender's fragment payload cap (1150 on DC, 65536 on stream).
     pub max_fragment_payload: u32,
-    /// The sender's block grid size in cells.
+    /// The sender's cell grid size in cells.
     pub cell_size: u32,
-    /// Block grid columns.
-    pub block_cols: u32,
-    /// Block grid rows.
-    pub block_rows: u32,
+    /// Cell grid columns.
+    pub cell_cols: u32,
+    /// Cell grid rows.
+    pub cell_rows: u32,
     /// Capability names, see [`capability`].
     pub capabilities: Vec<String>,
     /// The sender's encoder fps ceiling.
@@ -206,12 +209,12 @@ pub struct MediaHelloAck {
     pub media_session_id: String,
     /// `min(sender, receiver)` fragment payload cap.
     pub accepted_fragment_payload: u32,
-    /// The agreed block grid size in cells.
+    /// The agreed cell grid size in cells.
     pub cell_size: u32,
-    /// Block grid columns.
-    pub block_cols: u32,
-    /// Block grid rows.
-    pub block_rows: u32,
+    /// Cell grid columns.
+    pub cell_cols: u32,
+    /// Cell grid rows.
+    pub cell_rows: u32,
     /// Agreed capability names.
     pub capabilities: Vec<String>,
     /// The park/resume window in seconds.
@@ -254,8 +257,8 @@ pub struct MediaResumeAck {
     pub reason: resume::ResumeRejectReason,
     /// The update id the sender will use next for this receiver.
     pub next_update_id: u64,
-    /// Blocks the sender will re-send (diagnostics; the plan follows in updates).
-    pub pending_blocks: u64,
+    /// Cells the sender will re-send (diagnostics; the plan follows in updates).
+    pub pending_cells: u64,
     /// Current pace in bits per second.
     pub pace_bps: u32,
     /// Current per-update budget in bytes.
@@ -284,7 +287,7 @@ pub struct MediaAnchorPlan {
     pub plan_id: u32,
     /// Estimated updates to finish the plan.
     pub total_frames_estimate: u32,
-    /// Blocks in the plan.
+    /// Cells in the plan.
     pub total_blocks: u32,
     /// Plan priority (MLP spec §7.3.1).
     pub priority: u8,
@@ -424,9 +427,9 @@ pub struct MediaAck {
     pub ack_bitmap: u64,
     /// The receiver's chain epoch.
     pub chain_epoch: u32,
-    /// The receiver's block grid size.
+    /// The receiver's cell grid size.
     pub applied_block_count: u32,
-    /// The receiver's own count of blocks it believes stale.
+    /// The receiver's own count of cells it believes stale.
     pub stale_blocks: u32,
     /// The receiver's belief; the sender's accounting is authoritative.
     pub converged: bool,
@@ -811,8 +814,8 @@ mod tests {
             session_id: "s".into(),
             max_fragment_payload: 65_536,
             cell_size: 64,
-            block_cols: 30,
-            block_rows: 17,
+            cell_cols: 30,
+            cell_rows: 17,
             capabilities: vec![capability::ANCHOR.into()],
             encoder_max_fps: 30,
             start_epoch_ms: 0,
@@ -825,8 +828,8 @@ mod tests {
             media_session_id: "m".into(),
             accepted_fragment_payload: 65_536,
             cell_size: 64,
-            block_cols: 30,
-            block_rows: 17,
+            cell_cols: 30,
+            cell_rows: 17,
             capabilities: vec![capability::ANCHOR.into()],
             resume_ttl_seconds: 900,
             media_supported: true,

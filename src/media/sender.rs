@@ -2,7 +2,7 @@
 //!
 //! [`MediaSenderMachine`] owns the outbound policy of one `(sender, receiver)`
 //! media session: update chunking into MLP objects, object ids, the priority
-//! queue, the pacer, the estimator, per-receiver block accounting and the anchor
+//! queue, the pacer, the estimator, per-receiver cell accounting and the anchor
 //! plan ladder. Everything the peer must be told about (lane state, plans,
 //! oversize breaches) leaves as a [`MediaSenderEvent`] so the driver can
 //! serialize the matching control object and update metrics.
@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::action::Transmit;
 use crate::state_machine::StateMachine;
 
-use super::blocks::{BlockAccounting, BlockAccountingConfig, BlockGrid};
 use super::bwe::{BandwidthEstimator, BweConfig, Estimate};
+use super::cells::{BlockAccounting, BlockAccountingConfig, BlockGrid};
 use super::error::RejectReason;
 use super::input::InputToken;
 use super::lifecycle::{
@@ -23,12 +23,12 @@ use super::lifecycle::{
 };
 use super::pacer::{AcquireResult, MediaPacer, PacerConfig};
 use super::pdu::{
-    Carrier, Fragment, FragmentClass, FragmentFlags, UpdateMeta, HeaderExt, Priority, TrafficClass,
+    Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, TrafficClass, UpdateMeta,
     tlv,
 };
 use super::scheduler::{
-    UpdateBudget, UpdateKind, PlanConfig, PlanStartReason, ScheduleDecision, ScheduleRequest,
-    Scheduler, SchedulerConfig,
+    PlanConfig, PlanStartReason, ScheduleDecision, ScheduleRequest, Scheduler, SchedulerConfig,
+    UpdateBudget, UpdateKind,
 };
 use super::{
     MediaAck, MediaClose, MediaControlObject, MediaCursor, MediaFeedback, MediaHopReport,
@@ -45,14 +45,14 @@ pub enum MediaSenderEvent {
     /// The plan's bands are not events: each band is a update the driver pulls
     /// through [`MediaSenderMachine::plan_next_frame`], and the plan advances by
     /// exactly the bands it encoded (MLP spec §6.2). A plan that advanced on a
-    /// poll would skip the blocks of every band it did not paint.
+    /// poll would skip the cells of every band it did not paint.
     PlanStarted {
         /// Plan id.
         plan_id: u32,
         /// Why it started.
         reason: PlanStartReason,
-        /// Blocks in the plan.
-        blocks: u32,
+        /// Cells in the plan.
+        cells: u32,
         /// Estimated updates to finish.
         updates_estimate: u32,
     },
@@ -165,7 +165,7 @@ pub struct MediaSenderConfig {
     ///
     /// The cap bounds the sender's own queue and what the carrier is handed —
     /// not how many updates may be in flight across the network. Delivery
-    /// across the network is the block accounting's job (MLP spec annex D, D-7), so an ack is
+    /// across the network is the cell accounting's job (MLP spec annex D, D-7), so an ack is
     /// never a throughput gate.
     pub in_flight_cap: usize,
     /// Bound on objects queued for release (MLP spec §4.2: bounded lanes).
@@ -187,15 +187,17 @@ pub struct MediaSenderConfig {
     pub plan: PlanConfig,
     /// Scheduler policy.
     pub scheduler: SchedulerConfig,
-    /// Block accounting policy.
+    /// Cell accounting policy.
     pub accounting: BlockAccountingConfig,
 }
 
 impl MediaSenderConfig {
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: BlockGrid) -> Self {
-        let mut accounting = BlockAccountingConfig::default();
-        accounting.datagram = carrier.is_datagram();
+        let accounting = BlockAccountingConfig {
+            datagram: carrier.is_datagram(),
+            ..BlockAccountingConfig::default()
+        };
         Self {
             carrier,
             fragment_payload_max: carrier.fragment_payload_max(),
@@ -208,7 +210,7 @@ impl MediaSenderConfig {
             idle_frames: true,
             bwe: BweConfig::default(),
             plan: PlanConfig {
-                anchor_threshold: (grid.blocks() / 4).max(16),
+                anchor_threshold: (grid.cells() / 4).max(16),
                 ..PlanConfig::default()
             },
             scheduler: SchedulerConfig::default(),
@@ -222,8 +224,8 @@ impl MediaSenderConfig {
 pub struct UpdateRequest {
     /// The serialized chunk payloads, in chunk order.
     pub chunks: Vec<Vec<u8>>,
-    /// Blocks the update's regions cover (advances `E`).
-    pub blocks: Vec<u32>,
+    /// Cells the update's regions cover (advances `E`).
+    pub cells: Vec<u32>,
     /// Whether the update may apply onto any held state.
     pub anchor: bool,
     /// The update kind (metrics + idle/pulse handling).
@@ -240,10 +242,10 @@ pub struct UpdateRequest {
 
 impl UpdateRequest {
     /// A single-chunk delta update.
-    pub fn delta(chunk: Vec<u8>, blocks: Vec<u32>) -> Self {
+    pub fn delta(chunk: Vec<u8>, cells: Vec<u32>) -> Self {
         Self {
             chunks: vec![chunk],
-            blocks,
+            cells,
             anchor: false,
             kind: UpdateKind::Delta,
             reflects_input_seq: 0,
@@ -253,11 +255,11 @@ impl UpdateRequest {
         }
     }
 
-    /// An idle update: no cells, no blocks.
+    /// An idle update: no cells, no cells.
     pub fn idle() -> Self {
         Self {
             chunks: vec![Vec::new()],
-            blocks: Vec::new(),
+            cells: Vec::new(),
             anchor: false,
             kind: UpdateKind::Idle,
             reflects_input_seq: 0,
@@ -445,12 +447,8 @@ impl PathSelector {
                 if !path.is_datagram() {
                     return None;
                 }
-                let Some(datagram) = datagram else {
-                    return None;
-                };
-                let Some(ws) = ws else {
-                    return None;
-                };
+                let datagram = datagram?;
+                let ws = ws?;
                 let target = if dc.is_some() {
                     MediaPath::DcDirect
                 } else {
@@ -478,9 +476,7 @@ impl PathSelector {
                 if path != active {
                     return None;
                 }
-                let Some(ws) = ws else {
-                    return None;
-                };
+                let ws = ws?;
                 let current = datagram.unwrap_or(0);
                 let threshold = self.config.demote_ratio * ws as f64;
                 let below = (current as f64) < threshold;
@@ -626,7 +622,7 @@ struct OutboundObject {
     next_fragment: u16,
     fragment_count: u16,
     update_id: Option<u64>,
-    blocks: Vec<u32>,
+    cells: Vec<u32>,
     enqueued_at: Instant,
     deadline_epoch_ms: Option<u64>,
     echo_critical: bool,
@@ -638,11 +634,11 @@ impl OutboundObject {
         self.next_fragment >= self.fragment_count
     }
 
-    /// Whether every block this object carries is covered by `plan_blocks`.
+    /// Whether every cell this object carries is covered by `plan_blocks`.
     fn superseded_by(&self, plan_blocks: &std::collections::HashSet<u32>) -> bool {
         self.update_id.is_some()
-            && !self.blocks.is_empty()
-            && self.blocks.iter().all(|block| plan_blocks.contains(block))
+            && !self.cells.is_empty()
+            && self.cells.iter().all(|cell| plan_blocks.contains(cell))
     }
 }
 
@@ -751,12 +747,12 @@ impl MediaSenderMachine {
         &mut self.scheduler
     }
 
-    /// Per-receiver block accounting.
+    /// Per-receiver cell accounting.
     pub fn accounting(&self) -> &BlockAccounting {
         &self.accounting
     }
 
-    /// Per-receiver block accounting, mutable.
+    /// Per-receiver cell accounting, mutable.
     pub fn accounting_mut(&mut self) -> &mut BlockAccounting {
         &mut self.accounting
     }
@@ -804,7 +800,7 @@ impl MediaSenderMachine {
             .set_epoch(self.accounting.epoch().wrapping_add(1));
         self.scheduler
             .plans_mut()
-            .set_anchor_threshold((grid.blocks() / 4).max(16));
+            .set_anchor_threshold((grid.cells() / 4).max(16));
         self.request_plan(PlanStartReason::Geometry);
         self.refresh_estimate(now);
         true
@@ -813,7 +809,7 @@ impl MediaSenderMachine {
     /// Note the input/focus rectangle and open a pulse window.
     pub fn request_pulse(
         &mut self,
-        focus: super::blocks::BlockRect,
+        focus: super::cells::CellRect,
         now: Instant,
     ) -> Vec<MediaSenderEvent> {
         let rtt_ms = self.estimator.rtt_ms().max(1.0);
@@ -888,10 +884,10 @@ impl MediaSenderMachine {
             };
         }
         let update_id = self.next_update_id;
-        // Chain on what the receiver confirmed (`last_applied_frame_id`), not on
+        // Chain on what the receiver confirmed (`last_applied_update_id`), not on
         // the last update this sender emitted: a update the receiver never applied
         // cannot be the base of the next delta (MLP spec §6.1).
-        let update_base = self.accounting.last_applied_frame_id();
+        let update_base = self.accounting.last_applied_update_id();
         let session_ms = self.session_ms(now);
         let part_count = update.chunks.len() as u16;
         let mut first_object_id = 0;
@@ -908,7 +904,7 @@ impl MediaSenderMachine {
                 send_epoch_ms: session_ms,
             };
             let mut ext = meta.to_ext();
-            let _ = ext.push_u32(tlv::BLOCK_COUNT, self.accounting.grid().blocks());
+            let _ = ext.push_u32(tlv::BLOCK_COUNT, self.accounting.grid().cells());
             let mut flags = FragmentFlags::NONE;
             if update.anchor {
                 flags = flags.union(FragmentFlags::ANCHOR);
@@ -944,7 +940,7 @@ impl MediaSenderMachine {
                 next_fragment: 0,
                 fragment_count,
                 update_id: Some(update_id),
-                blocks: update.blocks.clone(),
+                cells: update.cells.clone(),
                 enqueued_at: now,
                 deadline_epoch_ms: update.deadline_epoch_ms,
                 echo_critical: update.echo_critical,
@@ -958,7 +954,7 @@ impl MediaSenderMachine {
         self.next_update_id = self.next_update_id.wrapping_add(1).max(1);
         self.last_emitted_frame_id = update_id;
         self.accounting
-            .mark_emitted(update_id, &update.blocks, session_ms);
+            .mark_emitted(update_id, &update.cells, session_ms);
         self.scheduler.timer_mut().on_frame(session_ms);
         let slot = match update.kind {
             UpdateKind::Delta => 0,
@@ -1018,7 +1014,7 @@ impl MediaSenderMachine {
             next_fragment: 0,
             fragment_count: 1,
             update_id: None,
-            blocks: Vec::new(),
+            cells: Vec::new(),
             enqueued_at: now,
             deadline_epoch_ms: None,
             echo_critical: false,
@@ -1067,7 +1063,7 @@ impl MediaSenderMachine {
             next_fragment: 0,
             fragment_count,
             update_id: None,
-            blocks: Vec::new(),
+            cells: Vec::new(),
             enqueued_at: now,
             deadline_epoch_ms: None,
             echo_critical: false,
@@ -1311,7 +1307,7 @@ impl MediaSenderMachine {
     /// A running plan's bands are pulled by the update path alone
     /// ([`Self::plan_next_frame`] → `Scheduler::schedule`): a band is only a
     /// band once it is a update, so a poll that took one would advance the plan
-    /// without painting its blocks.
+    /// without painting its cells.
     pub fn poll_plans(&mut self, now: Instant) -> Vec<MediaSenderEvent> {
         let mut events = Vec::new();
         let session_ms = self.session_ms(now);
@@ -1335,37 +1331,37 @@ impl MediaSenderMachine {
             None
         };
         if let Some(reason) = reason {
-            let blocks: Vec<u32> = match reason {
+            let cells: Vec<u32> = match reason {
                 PlanStartReason::Stuck => {
-                    let mut blocks = stuck;
-                    blocks.extend(self.accounting.pending_blocks());
-                    blocks.sort_unstable();
-                    blocks.dedup();
-                    blocks
+                    let mut cells = stuck;
+                    cells.extend(self.accounting.pending_cells());
+                    cells.sort_unstable();
+                    cells.dedup();
+                    cells
                 }
                 PlanStartReason::Pending | PlanStartReason::Resume => {
-                    self.accounting.pending_blocks()
+                    self.accounting.pending_cells()
                 }
                 PlanStartReason::Epoch | PlanStartReason::Geometry => {
-                    (0..self.accounting.grid().blocks()).collect()
+                    (0..self.accounting.grid().cells()).collect()
                 }
             };
-            let block_bytes = self
+            let cell_bytes = self
                 .config
                 .scheduler
                 .block_bytes_for(self.accounting.grid())
                 .max(1);
-            let updates_estimate = blocks
+            let updates_estimate = cells
                 .len()
-                .div_ceil((self.last_estimate.budget_bytes / block_bytes).max(1) as usize)
+                .div_ceil((self.last_estimate.budget_bytes / cell_bytes).max(1) as usize)
                 as u32;
             let plan_id = self
                 .scheduler
                 .plans_mut()
-                .start(reason, blocks.clone(), session_ms);
+                .start(reason, cells.clone(), session_ms);
             if let Some(plan_id) = plan_id {
                 self.pending_plan_reasons.clear();
-                let covered: std::collections::HashSet<u32> = blocks.iter().copied().collect();
+                let covered: std::collections::HashSet<u32> = cells.iter().copied().collect();
                 let mut index = 0;
                 while index < self.objects.len() {
                     if self.objects[index].superseded_by(&covered) {
@@ -1383,7 +1379,7 @@ impl MediaSenderMachine {
                 events.push(MediaSenderEvent::PlanStarted {
                     plan_id,
                     reason,
-                    blocks: blocks.len() as u32,
+                    cells: cells.len() as u32,
                     updates_estimate,
                 });
             }
@@ -1412,7 +1408,7 @@ impl MediaSenderMachine {
             path_chunk_cap: self.config.fragment_payload_max as u32,
         };
         // The sender sets ANCHOR whenever it knows the receiver may not be able to
-        // chain: strict patch mode, a running plan, a update that repairs blocks
+        // chain: strict patch mode, a running plan, a update that repairs cells
         // (whose base the receiver may never have applied), or an input pulse
         // (the echo-critical update must apply onto whatever the receiver holds).
         // Anchoring a repair or a pulse is what makes convergence and the echo
@@ -1430,7 +1426,7 @@ impl MediaSenderMachine {
             || pulse_active
             || self.accounting.pending_count() > 0;
         // Speculation is a *remainder* activity: while this receiver owes
-        // acknowledgements or repairs, P3 blocks are left out entirely, which
+        // acknowledgements or repairs, P3 cells are left out entirely, which
         // is what lets `pending` actually reach zero (the convergence
         // predicate of MLP spec annex D, D-7 / annex N, N-2) instead of trickling forever.
         let speculative = self.accounting.pending_count() == 0
@@ -1709,7 +1705,7 @@ impl MediaSenderMachine {
             next_fragment: 0,
             fragment_count,
             update_id: None,
-            blocks: Vec::new(),
+            cells: Vec::new(),
             enqueued_at: now,
             deadline_epoch_ms: None,
             echo_critical: flags.contains(FragmentFlags::ECHO_REQUESTED),
@@ -1763,7 +1759,7 @@ impl MediaSenderMachine {
     /// Pick the object whose next fragment should go first.
     ///
     /// Order is by MLP priority, then by age — but an object whose next
-    /// fragment the pacer cannot grant right now must not block a smaller one
+    /// fragment the pacer cannot grant right now must not cell a smaller one
     /// behind it (a large media update waiting for window room would otherwise
     /// stall control, acks and repairs, which is exactly the head-of-line
     /// coupling the pacer exists to prevent).
@@ -1867,7 +1863,7 @@ impl MediaSenderMachine {
             next_fragment: 0,
             fragment_count: source.fragment_count,
             update_id: source.update_id,
-            blocks: Vec::new(),
+            cells: Vec::new(),
             enqueued_at: now,
             deadline_epoch_ms: source.deadline_epoch_ms,
             echo_critical: false,
@@ -1884,7 +1880,7 @@ impl MediaSenderMachine {
     ///
     /// A carrier that cannot accept a fragment for that long is not going to
     /// accept it later; the object leaves and the accounting repairs its
-    /// blocks. Urgent control objects are kept.
+    /// cells. Urgent control objects are kept.
     fn reap_write_queue(&mut self, now: Instant) {
         let wait = Duration::from_millis(self.config.max_in_flight_wait_ms);
         let mut index = 0;
@@ -2212,7 +2208,7 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, MediaSenderEvent::PlanStarted { .. })),
-            "a stuck block starts a plan"
+            "a stuck cell starts a plan"
         );
         assert!(sender.scheduler().plans().is_active());
         assert!(sender.poll_plans(at).is_empty());
@@ -2232,7 +2228,7 @@ mod tests {
         let plan_blocks = events
             .iter()
             .find_map(|event| match event {
-                MediaSenderEvent::PlanStarted { blocks, .. } => Some(*blocks),
+                MediaSenderEvent::PlanStarted { cells, .. } => Some(*cells),
                 _ => None,
             })
             .expect("a geometry change starts a plan");
@@ -2248,7 +2244,7 @@ mod tests {
             "the plan is still owed its updates"
         );
         // The update path pulls the bands and together they cover the plan's
-        // block list exactly once — no band is skipped or repeated.
+        // cell list exactly once — no band is skipped or repeated.
         let mut covered: Vec<u32> = Vec::new();
         let mut bands = 0_u32;
         while sender.scheduler().plans().is_active() {
@@ -2258,21 +2254,21 @@ mod tests {
                 "an active plan owns the update: {:?}",
                 decision.kind
             );
-            covered.extend(&decision.blocks);
+            covered.extend(&decision.cells);
             bands += 1;
-            assert!(bands <= plan_blocks, "every band carries blocks");
+            assert!(bands <= plan_blocks, "every band carries cells");
         }
         assert_eq!(
             covered.len() as u32,
             plan_blocks,
-            "the updates cover the plan's block count"
+            "the updates cover the plan's cell count"
         );
         covered.sort_unstable();
         covered.dedup();
         assert_eq!(
             covered.len() as u32,
             plan_blocks,
-            "no planned block is skipped or sent twice"
+            "no planned cell is skipped or sent twice"
         );
         let (started, completed, overdue) = sender.scheduler().plans().counters();
         assert_eq!(
@@ -2308,7 +2304,7 @@ mod tests {
     fn release_tokens_helper_extracts_releases() {
         use super::super::resume::ResumeAction;
         let actions = vec![
-            ResumeAction::Rebase { pending_blocks: 0 },
+            ResumeAction::Rebase { pending_cells: 0 },
             ResumeAction::ReleaseKeys {
                 tokens: vec![InputToken::Key(1)],
             },

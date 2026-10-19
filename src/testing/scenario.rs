@@ -8,10 +8,10 @@
 //!
 //! Two simulation-only conventions, so the runner needs no codec:
 //!
-//! * A media update's payload starts with a 256-byte block bitmap followed by
+//! * A media update's payload starts with a 256-byte cell bitmap followed by
 //!   padding to the update's estimated size. A real decoder learns the same
 //!   coverage from the region ops; the bitmap is the smallest honest stand-in.
-//! * Viewer→sender reports carry a marker prefix (`fb`, `probe`, `echo`) and a
+//! * Receiver→sender reports carry a marker prefix (`fb`, `probe`, `echo`) and a
 //!   JSON body for `MediaFeedback`. A real driver uses protobuf; the marker is
 //!   what lets the simulator hand the typed body back to the sender machine.
 
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::media::blocks::{BlockGrid, BlockRect};
+use crate::media::cells::{BlockGrid, CellRect};
 use crate::media::input::{
     GatewayInputEnvelope, HostInputConfig, HostInputState, InputFlags, InputKind as InputEventKind,
     InputQueueConfig, InputToken, ViewerInputQueue, decode_pressed_set, encode_pressed_set,
@@ -32,8 +32,8 @@ use crate::media::resume::{
     HeldViewerState, ParkPolicy, ResumeAction, ResumeBinding, ResumeClaims, ResumeRequest,
     decide_resume,
 };
-use crate::media::scheduler::{UpdateKind, ScheduleDecision};
-use crate::media::sender::{EnqueueOutcome, UpdateRequest, MediaSenderConfig, MediaSenderMachine};
+use crate::media::scheduler::{ScheduleDecision, UpdateKind};
+use crate::media::sender::{EnqueueOutcome, MediaSenderConfig, MediaSenderMachine, UpdateRequest};
 use crate::media::{MediaFeedback, MediaPath};
 use crate::testing::lossy_link::{Delivery, Endpoint, LinkProfile, LinkStats, LossyLink, Tier};
 
@@ -49,9 +49,9 @@ pub const SIM_TICK_MS: u64 = 10;
 /// First object id the simulator's own messages use (see [`Sim::wrap_message`]).
 pub const SIM_OBJECT_ID_BASE: u32 = 0x4000_0000;
 
-/// Bytes of the block bitmap at the head of a simulated update payload.
+/// Bytes of the cell bitmap at the head of a simulated update payload.
 pub const SIM_BITMAP_BYTES: usize = 256;
-/// Simulated encoded bytes per block: the update-size model the runner uses.
+/// Simulated encoded bytes per cell: the update-size model the runner uses.
 pub const SIM_BYTES_PER_BLOCK: usize = 256;
 
 /// The design's invariants (MLP spec §12).
@@ -121,7 +121,7 @@ pub enum Step {
     /// Change the link conditions.
     Link(Box<LinkProfile>),
     /// The capture produced a change inside this rectangle.
-    CaptureChange(BlockRect),
+    CaptureChange(CellRect),
     /// The user did something.
     ViewerInput(InputEventKind),
     /// The receiver's lane dies (park).
@@ -173,7 +173,7 @@ impl Scenario {
     }
 
     /// Append a capture change.
-    pub fn change(self, rect: BlockRect) -> Self {
+    pub fn change(self, rect: CellRect) -> Self {
         self.step(Step::CaptureChange(rect))
     }
 
@@ -203,8 +203,8 @@ pub struct UpdateTrace {
     pub update_id: u64,
     /// Update kind.
     pub kind: String,
-    /// Blocks covered.
-    pub blocks: u32,
+    /// Cells covered.
+    pub cells: u32,
     /// Payload bytes.
     pub bytes: u32,
 }
@@ -216,8 +216,8 @@ pub struct AckTrace {
     pub at_ms: u64,
     /// Highest applied update id.
     pub highest_applied_update_id: u64,
-    /// Blocks still pending on the sender after the ack.
-    pub pending_blocks: u32,
+    /// Cells still pending on the sender after the ack.
+    pub pending_cells: u32,
     /// Whether the sender's accounting reports convergence.
     pub converged: bool,
 }
@@ -231,8 +231,8 @@ pub struct PlanTrace {
     pub plan_id: u32,
     /// What happened.
     pub event: String,
-    /// Blocks involved.
-    pub blocks: u32,
+    /// Cells involved.
+    pub cells: u32,
 }
 
 /// One lane-state change in the trace.
@@ -262,7 +262,7 @@ pub struct TraceCounters {
     pub updates_sent: u64,
     /// Updates applied by the receiver.
     pub updates_applied: u64,
-    /// Updates whose blocks the receiver acked.
+    /// Updates whose cells the receiver acked.
     pub updates_acked: u64,
     /// Updates refused because their base was missing (a gap application).
     pub updates_gapped: u64,
@@ -282,8 +282,8 @@ pub struct TraceCounters {
     pub plans_started: u64,
     /// Converged observations.
     pub converged_observations: u64,
-    /// The last observed pending block count.
-    pub pending_blocks: u32,
+    /// The last observed pending cell count.
+    pub pending_cells: u32,
     /// Time from the last capture change to convergence, when it happened.
     pub last_converge_ms: Option<u64>,
     /// Echo measurements: `(input_seq, echo_ms)`.
@@ -303,9 +303,9 @@ pub struct TraceCounters {
     /// Echo samples above the tier budget + one simulator tick (the tail a
     /// p95 assertion tolerates; the specification's promise is a p95, §3.2).
     pub echo_outliers: u64,
-    /// Block writes skipped because the held cell was newer (reordering).
+    /// Cell writes skipped because the held cell was newer (reordering).
     pub stale_applies_skipped: u64,
-    /// Blocks whose held update is older than the emitted state at a converged
+    /// Cells whose held update is older than the emitted state at a converged
     /// observation (reported, not hidden).
     pub canvas_behind_blocks: u64,
     /// Pacer refusals observed by the sender (S-14's fixture-level pacing check).
@@ -316,14 +316,14 @@ pub struct TraceCounters {
     pub state_changes: u64,
     /// Hop-attributed dropped objects (simulated intermediary).
     pub hop_dropped: u64,
-    /// Host probes whose echo never returned.
+    /// Sender probes whose echo never returned.
     pub probes_lost: u64,
     /// Objects the receiver lost (object-id gaps).
     pub viewer_lost_objects: u64,
     /// The final lane state.
     pub final_state: String,
-    /// The final receiver canvas size in blocks.
-    pub blocks: u32,
+    /// The final receiver canvas size in cells.
+    pub cells: u32,
     /// The simulated epoch at the end.
     pub epoch: u32,
 }
@@ -380,7 +380,7 @@ impl Trace {
         for update in &self.updates {
             for byte in format!(
                 "{}:{}:{}:{}|",
-                update.at_ms, update.update_id, update.kind, update.blocks
+                update.at_ms, update.update_id, update.kind, update.cells
             )
             .bytes()
             {
@@ -390,7 +390,7 @@ impl Trace {
         for ack in &self.acks {
             for byte in format!(
                 "{}:{}:{}|",
-                ack.at_ms, ack.highest_applied_update_id, ack.pending_blocks
+                ack.at_ms, ack.highest_applied_update_id, ack.pending_cells
             )
             .bytes()
             {
@@ -418,16 +418,10 @@ impl Trace {
 }
 
 /// How many hops the simulated intermediary drops and reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RelayModel {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IntermediaryModel {
     /// Drop probability in permille.
     pub drop_permille: u32,
-}
-
-impl Default for RelayModel {
-    fn default() -> Self {
-        Self { drop_permille: 0 }
-    }
 }
 
 /// The receiver's shadow state.
@@ -468,7 +462,7 @@ struct Sim {
     parked_since_ms: Option<u64>,
     held: HeldViewerState,
     park_policy: ParkPolicy,
-    intermediary: RelayModel,
+    intermediary: IntermediaryModel,
     relay_drops: u64,
     resumes: u32,
     echo_records: Vec<(u64, u64)>,
@@ -485,11 +479,11 @@ struct Sim {
 
 /// Run a scenario and return its trace.
 pub fn run(scenario: &Scenario) -> Trace {
-    run_with_relay(scenario, RelayModel::default())
+    run_with_relay(scenario, IntermediaryModel::default())
 }
 
 /// Run a scenario with a simulated intermediary hop that drops and reports objects.
-pub fn run_with_relay(scenario: &Scenario, intermediary: RelayModel) -> Trace {
+pub fn run_with_relay(scenario: &Scenario, intermediary: IntermediaryModel) -> Trace {
     let grid = BlockGrid::with_block_size(1920, 1080, 64);
     let profile = LinkProfile::tier(scenario.tier);
     let epoch = crate::testing::test_epoch();
@@ -516,7 +510,7 @@ impl Sim {
         profile: LinkProfile,
         carrier: Carrier,
         epoch: Instant,
-        intermediary: RelayModel,
+        intermediary: IntermediaryModel,
     ) -> Self {
         let profile_for_stats = profile.clone();
         let profile_rtt_ms = profile.rtt_ms;
@@ -533,7 +527,7 @@ impl Sim {
         let viewer_config = MediaReceiverConfig::for_carrier(carrier);
         let receiver = MediaReceiverMachine::new(viewer_config, epoch);
         let host_rx = MediaReceiverMachine::new(viewer_config, epoch);
-        let blocks = grid.blocks() as usize;
+        let cells = grid.cells() as usize;
         let trace = Trace {
             name: scenario.name.clone(),
             tier: scenario.tier,
@@ -556,7 +550,7 @@ impl Sim {
                 feedback: 0,
                 plans_started: 0,
                 converged_observations: 0,
-                pending_blocks: 0,
+                pending_cells: 0,
                 last_converge_ms: None,
                 echoes: Vec::new(),
                 input_submitted: 0,
@@ -575,7 +569,7 @@ impl Sim {
                 probes_lost: 0,
                 viewer_lost_objects: 0,
                 final_state: String::new(),
-                blocks: grid.blocks(),
+                cells: grid.cells(),
                 epoch: 0,
             },
             link: *LossyLink::new(profile_for_stats.clone()).stats(),
@@ -590,11 +584,11 @@ impl Sim {
             host_rx,
             receiver,
             viewer_model: ViewerModel {
-                canvas: vec![0; blocks],
+                canvas: vec![0; cells],
                 ..ViewerModel::default()
             },
             host_model: HostModel {
-                emitted: vec![0; blocks],
+                emitted: vec![0; cells],
                 ..HostModel::default()
             },
             capture_dirty: Vec::new(),
@@ -644,9 +638,9 @@ impl Sim {
                 self.link.set_profile((**profile).clone());
             }
             Step::CaptureChange(rect) => {
-                for block in self.grid.blocks_in_rect(rect) {
-                    if !self.capture_dirty.contains(&block) {
-                        self.capture_dirty.push(block);
+                for cell in self.grid.blocks_in_rect(rect) {
+                    if !self.capture_dirty.contains(&cell) {
+                        self.capture_dirty.push(cell);
                     }
                 }
                 self.capture_dirty.sort_unstable();
@@ -710,7 +704,7 @@ impl Sim {
         if !cadence && !pulse {
             return;
         }
-        // The encoder considers fresh changes, unacked blocks (repairs), the
+        // The encoder considers fresh changes, unacked cells (repairs), the
         // pulse window, or the idle cadence. Which of them becomes a update is
         // the scheduler's decision, not the driver's.
         let repairable = self.sender.accounting().pending_count() > 0;
@@ -735,7 +729,7 @@ impl Sim {
             .take(64)
             .collect();
         let decision = self.sender.plan_next_frame(&fresh, &refresh, now);
-        if decision.blocks.is_empty() {
+        if decision.cells.is_empty() {
             return;
         }
         let payload = self.encode_frame_payload(&decision);
@@ -748,7 +742,7 @@ impl Sim {
         }
         let request = UpdateRequest {
             chunks: vec![payload],
-            blocks: decision.blocks.clone(),
+            cells: decision.cells.clone(),
             anchor: decision.anchor,
             kind: decision.kind,
             reflects_input_seq: self.input_applied_seq,
@@ -759,44 +753,44 @@ impl Sim {
         match self.sender.enqueue_frame(request, now) {
             EnqueueOutcome::Accepted { .. } => {
                 let update_id = self.sender.next_update_id() - 1;
-                for block in &decision.blocks {
-                    self.host_model.emitted[*block as usize] = update_id;
-                    self.capture_dirty.retain(|dirty| dirty != block);
+                for cell in &decision.cells {
+                    self.host_model.emitted[*cell as usize] = update_id;
+                    self.capture_dirty.retain(|dirty| dirty != cell);
                 }
                 self.host_model
                     .updates
-                    .insert(update_id, decision.blocks.clone());
+                    .insert(update_id, decision.cells.clone());
                 self.record_frame(
                     update_id,
                     decision.kind.as_str(),
-                    decision.blocks.len() as u32,
+                    decision.cells.len() as u32,
                     payload_len(&decision) as u32,
                 );
                 // A plan band is a update: the trace records the band where the
                 // cells were committed, never where the plan ladder was
                 // polled. The last band carries `deferred == 0` (no plan
-                // blocks remain after it) and completes the plan.
+                // cells remain after it) and completes the plan.
                 if let Some(plan_id) = decision.plan_id {
                     self.trace.plans.push(PlanTrace {
                         at_ms: self.now_ms,
                         plan_id,
                         event: "band".to_string(),
-                        blocks: decision.blocks.len() as u32,
+                        cells: decision.cells.len() as u32,
                     });
                     if decision.deferred == 0 {
                         self.trace.plans.push(PlanTrace {
                             at_ms: self.now_ms,
                             plan_id,
                             event: "complete".to_string(),
-                            blocks: 0,
+                            cells: 0,
                         });
                     }
                 }
-                // The update painted its whole block list: settle the pull.
+                // The update painted its whole cell list: settle the pull.
                 self.sender
                     .scheduler_mut()
                     .plans_mut()
-                    .unclaim(&decision.blocks);
+                    .unclaim(&decision.cells);
                 if self.capture_dirty.is_empty() {
                     self.last_change_ms = self.now_ms;
                 }
@@ -806,7 +800,7 @@ impl Sim {
                 self.sender.scheduler_mut().plans_mut().unclaim(&[]);
             }
             EnqueueOutcome::Deferred { reason } | EnqueueOutcome::Coalesced { reason } => {
-                // The blocks stay dirty and are retried on the next cycle; the
+                // The cells stay dirty and are retried on the next cycle; the
                 // band the scheduler pulled went unpainted and is owed again.
                 let _ = &self.last_emitted_dirty;
                 let _ = reason;
@@ -869,12 +863,12 @@ impl Sim {
         }
     }
 
-    fn record_frame(&mut self, update_id: u64, kind: &str, blocks: u32, bytes: u32) {
+    fn record_frame(&mut self, update_id: u64, kind: &str, cells: u32, bytes: u32) {
         self.trace.updates.push(UpdateTrace {
             at_ms: self.now_ms,
             update_id,
             kind: kind.to_string(),
-            blocks,
+            cells,
             bytes,
         });
         self.trace.counters.updates_sent += 1;
@@ -889,10 +883,10 @@ impl Sim {
 
     fn encode_frame_payload(&self, decision: &ScheduleDecision) -> Vec<u8> {
         let mut payload = vec![0u8; SIM_BITMAP_BYTES];
-        for block in &decision.blocks {
-            let byte = (*block as usize) / 8;
+        for cell in &decision.cells {
+            let byte = (*cell as usize) / 8;
             if byte < SIM_BITMAP_BYTES {
-                payload[byte] |= 1 << (block % 8);
+                payload[byte] |= 1 << (cell % 8);
             }
         }
         // Pad to a plausible payload size, never above the object cap: on a
@@ -941,17 +935,17 @@ impl Sim {
             } else {
                 if !pending_message.is_empty() {
                     self.link
-                        .transmit(Endpoint::Host, core::mem::take(&mut pending_message));
+                        .transmit(Endpoint::Sender, core::mem::take(&mut pending_message));
                 }
                 if coalesce {
                     pending_message = fragment.bytes;
                 } else {
-                    self.link.transmit(Endpoint::Host, fragment.bytes);
+                    self.link.transmit(Endpoint::Sender, fragment.bytes);
                 }
             }
         }
         if !pending_message.is_empty() {
-            self.link.transmit(Endpoint::Host, pending_message);
+            self.link.transmit(Endpoint::Sender, pending_message);
         }
     }
 
@@ -982,14 +976,14 @@ impl Sim {
                 crate::media::sender::MediaSenderEvent::PlanStarted {
                     plan_id,
                     reason,
-                    blocks,
+                    cells,
                     ..
                 } => {
                     self.trace.plans.push(PlanTrace {
                         at_ms: self.now_ms,
                         plan_id: *plan_id,
                         event: format!("start:{}", reason.as_str()),
-                        blocks: *blocks,
+                        cells: *cells,
                     });
                     self.trace.counters.plans_started += 1;
                 }
@@ -998,7 +992,7 @@ impl Sim {
                         at_ms: self.now_ms,
                         plan_id: *plan_id,
                         event: "overdue".to_string(),
-                        blocks: 0,
+                        cells: 0,
                     });
                 }
                 crate::media::sender::MediaSenderEvent::LaneStateChanged(state) => {
@@ -1023,8 +1017,8 @@ impl Sim {
 
     fn deliver(&mut self, delivery: Delivery) {
         match delivery.to {
-            Endpoint::Viewer => self.viewer_receive(&delivery.bytes),
-            Endpoint::Host => self.host_receive(&delivery.bytes),
+            Endpoint::Receiver => self.viewer_receive(&delivery.bytes),
+            Endpoint::Sender => self.host_receive(&delivery.bytes),
         }
     }
 
@@ -1055,7 +1049,7 @@ impl Sim {
                             continue;
                         }
                     }
-                    let blocks = decode_block_bitmap(&object.payload, self.grid.blocks());
+                    let cells = decode_block_bitmap(&object.payload, self.grid.cells());
                     if self
                         .receiver
                         .is_chunk_applied(meta.update_id, meta.part_index)
@@ -1073,7 +1067,7 @@ impl Sim {
                     }
                     // Codec chaining: a delta needs its base, an anchor may be
                     // applied onto any held state (MLP spec §6.1). A refused
-                    // update is a `gap`: its blocks stay pending and the sender
+                    // update is a `gap`: its cells stay pending and the sender
                     // repairs them or starts a plan.
                     if !object.is_anchor()
                         && meta.update_base != 0
@@ -1087,12 +1081,12 @@ impl Sim {
                     }
                     self.receiver
                         .note_applied_chunk(meta.update_id, meta.part_index);
-                    for block in &blocks {
-                        self.viewer_model.canvas[*block as usize] = meta.update_id;
+                    for cell in &cells {
+                        self.viewer_model.canvas[*cell as usize] = meta.update_id;
                     }
                     self.viewer_model
                         .updates
-                        .insert(meta.update_id, blocks.clone());
+                        .insert(meta.update_id, cells.clone());
                     self.viewer_model.received_frames.insert(meta.update_id);
                     self.receiver.note_applied(meta.update_id);
                     self.viewer_model.applied_frames += 1;
@@ -1106,7 +1100,7 @@ impl Sim {
                     let ack = self.receiver.build_ack(ack_now);
                     let payload = encode_ack(&ack);
                     let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-                    self.link.transmit(Endpoint::Viewer, message);
+                    self.link.transmit(Endpoint::Receiver, message);
                     self.record_echo(meta.reflects_input_seq);
                 }
                 MediaReceiveEvent::FragmentDropped { .. }
@@ -1116,12 +1110,12 @@ impl Sim {
                 MediaReceiveEvent::ProbeEchoDue(echo) => {
                     let payload = encode_echo(&echo);
                     let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-                    self.link.transmit(Endpoint::Viewer, message);
+                    self.link.transmit(Endpoint::Receiver, message);
                 }
                 MediaReceiveEvent::ProbeDue(probe) => {
                     let payload = encode_probe(&probe);
                     let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-                    self.link.transmit(Endpoint::Viewer, message);
+                    self.link.transmit(Endpoint::Receiver, message);
                 }
                 MediaReceiveEvent::FeedbackDue => {}
             }
@@ -1140,28 +1134,28 @@ impl Sim {
                 self.trace.counters.last_converge_ms = Some(self.now_ms);
             }
             let mismatches: Vec<(usize, u64, u64)> = (0..self.host_model.emitted.len())
-                .filter(|block| self.viewer_model.canvas[*block] != self.host_model.emitted[*block])
-                .map(|block| {
+                .filter(|cell| self.viewer_model.canvas[*cell] != self.host_model.emitted[*cell])
+                .map(|cell| {
                     (
-                        block,
-                        self.viewer_model.canvas[block],
-                        self.host_model.emitted[block],
+                        cell,
+                        self.viewer_model.canvas[cell],
+                        self.host_model.emitted[cell],
                     )
                 })
                 .collect();
-            if let Some((block, canvas, emitted)) = mismatches.first().copied() {
+            if let Some((cell, canvas, emitted)) = mismatches.first().copied() {
                 self.trace.counters.canvas_behind_blocks += mismatches.len() as u64;
                 // INV-2 as the accounting can prove it: a converged receiver
-                // holds cells for every block the sender has emitted. A canvas
+                // holds cells for every cell the sender has emitted. A canvas
                 // *older* than the emitted state can occur while a reordered or
                 // repaired update is in flight — the playout guard keeps the
                 // newer cells — so it is reported as `canvas_behind_blocks`,
-                // and only a *missing* block is a violation.
+                // and only a *missing* cell is a violation.
                 if canvas == 0 && emitted > 0 {
                     self.violate(
                         Invariant::Inv2,
                         &format!(
-                            "converged with no cells for block {block} (emitted update {emitted})"
+                            "converged with no cells for cell {cell} (emitted update {emitted})"
                         ),
                     );
                 }
@@ -1176,7 +1170,7 @@ impl Sim {
         let (keys, buttons) = self.input_queue.pressed_set();
         let _ = encode_pressed_set(&keys, &buttons);
         self.receiver
-            .set_viewer_state(0, self.grid.blocks(), self.model_converged());
+            .set_viewer_state(0, self.grid.cells(), self.model_converged());
         let feedback = self.receiver.build_feedback(now);
         let pending = self.sender.accounting().pending_count();
         self.trace.acks.push(AckTrace {
@@ -1185,14 +1179,14 @@ impl Sim {
                 .ack
                 .map(|ack| ack.highest_applied_update_id)
                 .unwrap_or(0),
-            pending_blocks: pending,
+            pending_cells: pending,
             converged: self.sender.accounting().converged(),
         });
         self.trace.counters.acks += 1;
-        self.trace.counters.pending_blocks = pending;
+        self.trace.counters.pending_cells = pending;
         let payload = encode_feedback(&feedback);
         let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-        self.link.transmit(Endpoint::Viewer, message);
+        self.link.transmit(Endpoint::Receiver, message);
     }
 
     fn model_converged(&self) -> bool {
@@ -1204,58 +1198,55 @@ impl Sim {
         let now = self.instant();
         let events = self.host_rx.on_message(bytes, now);
         for event in events {
-            match event {
-                MediaReceiveEvent::Object(object) => {
-                    if let Some(feedback) = decode_feedback(&object.payload) {
-                        self.trace.counters.feedback += 1;
-                        let ack_count = u64::from(feedback.ack.is_some());
-                        let pending_before = self.sender.accounting().pending_count();
-                        let events = self.sender.on_feedback(feedback, now);
-                        self.note_sender_events(&events);
-                        if ack_count == 1 {
-                            self.trace.counters.acks += 1;
-                            self.trace.acks.push(AckTrace {
-                                at_ms: self.now_ms,
-                                highest_applied_update_id: self
-                                    .sender
-                                    .accounting()
-                                    .last_applied_frame_id(),
-                                pending_blocks: pending_before,
-                                converged: self.sender.accounting().converged(),
-                            });
-                        }
-                    } else if let Some(ack) = decode_ack(&object.payload) {
-                        let events = self.sender.on_ack(ack, now);
-                        self.note_sender_events(&events);
+            if let MediaReceiveEvent::Object(object) = event {
+                if let Some(feedback) = decode_feedback(&object.payload) {
+                    self.trace.counters.feedback += 1;
+                    let ack_count = u64::from(feedback.ack.is_some());
+                    let pending_before = self.sender.accounting().pending_count();
+                    let events = self.sender.on_feedback(feedback, now);
+                    self.note_sender_events(&events);
+                    if ack_count == 1 {
                         self.trace.counters.acks += 1;
                         self.trace.acks.push(AckTrace {
                             at_ms: self.now_ms,
                             highest_applied_update_id: self
                                 .sender
                                 .accounting()
-                                .last_applied_frame_id(),
-                            pending_blocks: self.sender.accounting().pending_count(),
+                                .last_applied_update_id(),
+                            pending_cells: pending_before,
                             converged: self.sender.accounting().converged(),
                         });
-                    } else if let Some(echo) = decode_echo(&object.payload) {
-                        let events = self.sender.on_probe_echo(echo, now);
-                        self.note_sender_events(&events);
-                    } else if let Some(probe) = decode_probe(&object.payload) {
-                        // The sender answers the receiver's probe with an echo.
-                        let reply = crate::media::ProbeEcho {
-                            object_id: probe.probe_id,
-                            send_epoch_ms: probe.send_epoch_ms,
-                            echo_epoch_ms: self.sender.session_ms(now),
-                            payload_bytes: probe.payload_bytes,
-                        };
-                        let payload = encode_echo(&reply);
-                        let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-                        self.link.transmit(Endpoint::Host, message);
-                    } else if let Some(envelope) = decode_input(&object.payload) {
-                        self.host_input_arrive(envelope);
                     }
+                } else if let Some(ack) = decode_ack(&object.payload) {
+                    let events = self.sender.on_ack(ack, now);
+                    self.note_sender_events(&events);
+                    self.trace.counters.acks += 1;
+                    self.trace.acks.push(AckTrace {
+                        at_ms: self.now_ms,
+                        highest_applied_update_id: self
+                            .sender
+                            .accounting()
+                            .last_applied_update_id(),
+                        pending_cells: self.sender.accounting().pending_count(),
+                        converged: self.sender.accounting().converged(),
+                    });
+                } else if let Some(echo) = decode_echo(&object.payload) {
+                    let events = self.sender.on_probe_echo(echo, now);
+                    self.note_sender_events(&events);
+                } else if let Some(probe) = decode_probe(&object.payload) {
+                    // The sender answers the receiver's probe with an echo.
+                    let reply = crate::media::ProbeEcho {
+                        object_id: probe.probe_id,
+                        send_epoch_ms: probe.send_epoch_ms,
+                        echo_epoch_ms: self.sender.session_ms(now),
+                        payload_bytes: probe.payload_bytes,
+                    };
+                    let payload = encode_echo(&reply);
+                    let message = self.wrap_message(FragmentClass::Feedback, payload, None);
+                    self.link.transmit(Endpoint::Sender, message);
+                } else if let Some(envelope) = decode_input(&object.payload) {
+                    self.host_input_arrive(envelope);
                 }
-                _ => {}
             }
         }
     }
@@ -1297,7 +1288,7 @@ impl Sim {
             self.trace.counters.input_submitted += 1;
             let payload = encode_input(&envelope);
             let message = self.wrap_message(FragmentClass::Control, payload, None);
-            self.link.transmit(Endpoint::Viewer, message);
+            self.link.transmit(Endpoint::Receiver, message);
         }
         // A pressed-set heartbeat goes out with each input burst.
         if let Some(heartbeat) = self.input_queue.poll_pressed_heartbeat(now_ms) {
@@ -1305,7 +1296,7 @@ impl Sim {
             self.input_sent.insert(heartbeat.input_seq, now_ms);
             let payload = encode_input(&heartbeat);
             let message = self.wrap_message(FragmentClass::Control, payload, None);
-            self.link.transmit(Endpoint::Viewer, message);
+            self.link.transmit(Endpoint::Receiver, message);
         }
     }
 
@@ -1329,7 +1320,7 @@ impl Sim {
                 // pulse update covering the focus region, so the echo promise is
                 // met on the very next update rather than the next idle update.
                 self.sender
-                    .request_pulse(BlockRect::new(96, 96, 64, 64), self.instant());
+                    .request_pulse(CellRect::new(96, 96, 64, 64), self.instant());
             }
         } else {
             self.trace.counters.input_dropped += 1;
@@ -1444,7 +1435,7 @@ impl Sim {
             pressed_buttons: buttons,
             active_path: self.path,
         };
-        self.held.pending_blocks = u64::from(self.sender.accounting().pending_count());
+        self.held.pending_cells = u64::from(self.sender.accounting().pending_count());
         self.held.next_update_id = self.sender.next_update_id();
         self.held.epoch = self.sender.accounting().epoch();
         self.held.pace_bps = self.sender.estimate().pace_bps;
@@ -1492,9 +1483,8 @@ impl Sim {
             Invariant::Inv1 => {
                 // Every applied update was complete by construction; assert the
                 // property the machine guarantees.
-                assert_eq!(
+                assert!(
                     self.receiver.stats().objects_by_class[2] >= self.viewer_model.applied_frames,
-                    true,
                     "the receiver applied more updates than it received objects"
                 );
             }
@@ -1502,16 +1492,16 @@ impl Sim {
                 // INV-2 is a statement about *converged* observations: while
                 // repairs are in flight the receiver legitimately holds older
                 // cells. The per-tick check in `viewer_feedback` counts the
-                // blocks that are behind; the explicit assertion additionally
-                // requires that, once converged, no emitted block is missing.
+                // cells that are behind; the explicit assertion additionally
+                // requires that, once converged, no emitted cell is missing.
                 if !self.sender.accounting().converged() {
                     return;
                 }
-                for (block, emitted) in self.host_model.emitted.iter().enumerate() {
-                    if *emitted > 0 && self.viewer_model.canvas[block] == 0 {
+                for (cell, emitted) in self.host_model.emitted.iter().enumerate() {
+                    if *emitted > 0 && self.viewer_model.canvas[cell] == 0 {
                         self.violate(
                             Invariant::Inv2,
-                            &format!("block {block} was emitted and never held"),
+                            &format!("cell {cell} was emitted and never held"),
                         );
                         break;
                     }
@@ -1546,7 +1536,10 @@ impl Sim {
                     && receiver.is_empty()
                     && !self.host_input.pressed().is_empty()
                 {
-                    self.violate(Invariant::Inv4, "keys are held with no receiver holding them");
+                    self.violate(
+                        Invariant::Inv4,
+                        "keys are held with no receiver holding them",
+                    );
                 }
             }
             Invariant::Inv5 => {
@@ -1572,7 +1565,7 @@ impl Sim {
                 let mut samples: Vec<u64> = self
                     .echo_records
                     .iter()
-                    .filter(|(_, echo)| *echo <= u64::MAX)
+                    .filter(|(_, echo)| *echo != u64::MAX)
                     .map(|(_, echo)| *echo)
                     .collect();
                 if samples.is_empty() {
@@ -1633,7 +1626,10 @@ impl Sim {
             self.violate(Invariant::Inv5, "the sender input worker exceeded its cap");
         }
         if self.receiver.assembler().open_objects() > 4 {
-            self.violate(Invariant::Inv5, "the receiver held more than 4 open objects");
+            self.violate(
+                Invariant::Inv5,
+                "the receiver held more than 4 open objects",
+            );
         }
         if self.link.in_flight() > 4_096 {
             self.violate(Invariant::Inv5, "the link queue is unbounded");
@@ -1715,8 +1711,8 @@ impl Sim {
             self.check_invariant(Invariant::Inv8);
         }
         self.trace.duration_ms = self.now_ms;
-        self.trace.counters.pending_blocks = self.sender.accounting().pending_count();
-        self.trace.counters.updates_acked = self.sender.accounting().last_applied_frame_id();
+        self.trace.counters.pending_cells = self.sender.accounting().pending_count();
+        self.trace.counters.updates_acked = self.sender.accounting().last_applied_update_id();
         self.trace.counters.epoch = self.sender.accounting().epoch();
         self.trace.counters.final_state = self.sender.lane_state().as_str().to_string();
         self.trace.link = *self.link.stats();
@@ -1734,20 +1730,22 @@ impl GatewayInputEnvelope {
 }
 
 fn payload_len(decision: &ScheduleDecision) -> usize {
-    (decision.blocks.len() as usize)
+    decision
+        .cells
+        .len()
         .saturating_mul(SIM_BYTES_PER_BLOCK)
         .max(32)
 }
 
-fn decode_block_bitmap(payload: &[u8], blocks: u32) -> Vec<u32> {
+fn decode_block_bitmap(payload: &[u8], cells: u32) -> Vec<u32> {
     let mut out = Vec::new();
-    for block in 0..blocks {
-        let byte = (block / 8) as usize;
+    for cell in 0..cells {
+        let byte = (cell / 8) as usize;
         if byte >= SIM_BITMAP_BYTES || byte >= payload.len() {
             break;
         }
-        if payload[byte] & (1 << (block % 8)) != 0 {
-            out.push(block);
+        if payload[byte] & (1 << (cell % 8)) != 0 {
+            out.push(cell);
         }
     }
     out
@@ -1926,7 +1924,7 @@ pub fn carrier_for_tier(tier: Tier) -> Carrier {
 pub fn cold_start_scenario(tier: Tier) -> Scenario {
     Scenario::new(format!("cold-{}", tier.as_str()), tier)
         .step(Step::Link(Box::new(LinkProfile::tier(tier).with_seed(1))))
-        .change(BlockRect::new(0, 0, 256, 128))
+        .change(CellRect::new(0, 0, 256, 128))
         .advance(12_000)
         .step(Step::Assert(Invariant::Inv5))
         .step(Step::Assert(Invariant::Inv6))
@@ -1937,7 +1935,7 @@ pub fn cold_start_scenario(tier: Tier) -> Scenario {
 /// the smallest useful end-to-end run.
 pub fn smoke_scenario(tier: Tier) -> Scenario {
     Scenario::new(format!("smoke-{}", tier.as_str()), tier)
-        .change(BlockRect::new(0, 0, 256, 128))
+        .change(CellRect::new(0, 0, 256, 128))
         .advance(2_000)
         .step(Step::Assert(Invariant::Inv1))
         .step(Step::Assert(Invariant::Inv2))
@@ -1971,7 +1969,7 @@ mod tests {
     #[test]
     fn traces_are_deterministic() {
         let scenario = Scenario::new("determinism", Tier::T2)
-            .change(BlockRect::new(0, 0, 512, 256))
+            .change(CellRect::new(0, 0, 512, 256))
             .advance(1_000)
             .input(InputEventKind::Key)
             .advance(1_000);
@@ -1984,7 +1982,7 @@ mod tests {
     #[test]
     fn a_lossy_tier_still_makes_progress() {
         let scenario = Scenario::new("t3-progress", Tier::T3)
-            .change(BlockRect::new(0, 0, 512, 256))
+            .change(CellRect::new(0, 0, 512, 256))
             .advance(6_000);
         let trace = run(&scenario);
         assert!(trace.counters.updates_sent >= 1);

@@ -114,7 +114,7 @@ pub struct Estimate {
     pub target_fps: f64,
     /// The operating mode.
     pub mode: BweMode,
-    /// Viewer-reported loss ratio of the last window.
+    /// Receiver-reported loss ratio of the last window.
     pub loss_ratio: f64,
     /// Smoothed RTT in ms.
     pub rtt_ms: f64,
@@ -521,9 +521,9 @@ impl BandwidthEstimator {
     /// Feed one hop report (MLP spec §7.2.9, D-16).
     pub fn on_hop_report(&mut self, report: &MediaHopReport, _now: Instant) {
         let drops = report.objects_dropped + report.coalesced;
-        if report.hop == super::hop::RELAY {
+        if report.hop == super::hop::FIRST {
             self.attribution.relay_dropped += drops;
-        } else if report.hop == super::hop::GATEWAY {
+        } else if report.hop == super::hop::SECOND {
             self.attribution.gateway_dropped += drops;
         } else {
             self.attribution.other_dropped += drops;
@@ -1042,7 +1042,7 @@ mod tests {
         estimator.on_feedback(&feedback(10, 100_000, 90, 10, 1_000), now);
         estimator.on_hop_report(
             &MediaHopReport {
-                hop: super::super::hop::RELAY,
+                hop: super::super::hop::FIRST,
                 objects_dropped: 4,
                 coalesced: 1,
                 ..MediaHopReport::default()
@@ -1051,7 +1051,7 @@ mod tests {
         );
         estimator.on_hop_report(
             &MediaHopReport {
-                hop: super::super::hop::GATEWAY,
+                hop: super::super::hop::SECOND,
                 objects_dropped: 3,
                 ..MediaHopReport::default()
             },

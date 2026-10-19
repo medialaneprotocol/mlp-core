@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 
 /// Default input deadline: the input deadline.
 pub const INPUT_DEADLINE_MS: u64 = 5_000;
-/// Viewer queue object capacity (MLP spec §9.2).
+/// Receiver queue object capacity (MLP spec §9.2).
 pub const INPUT_QUEUE_OBJECTS: usize = 64;
-/// Viewer queue byte capacity (MLP spec §9.2).
+/// Receiver queue byte capacity (MLP spec §9.2).
 pub const INPUT_QUEUE_BYTES: usize = 8 * 1024;
-/// Host input worker capacity (MLP spec §9.3).
+/// Sender input worker capacity (MLP spec §9.3).
 pub const HOST_WORKER_CAPACITY: usize = 64;
 /// `(epoch, seq)` dedup window (MLP spec §9.3).
 pub const INPUT_DEDUP_WINDOW: usize = 4096;
@@ -343,7 +343,7 @@ pub struct InputDropCounters {
     pub superseded: u64,
 }
 
-/// Viewer queue policy.
+/// Receiver queue policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputQueueConfig {
     /// Object capacity.
@@ -806,7 +806,7 @@ pub struct InputOutcome {
     pub releases: Vec<InputRelease>,
 }
 
-/// Host input policy (MLP spec §9.3).
+/// Sender input policy (MLP spec §9.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInputConfig {
     /// `(epoch, seq)` dedup window.
@@ -827,7 +827,7 @@ impl Default for HostInputConfig {
     }
 }
 
-/// Host-side input state: dedup, deadline, pressed set and releases.
+/// Sender-side input state: dedup, deadline, pressed set and releases.
 #[derive(Debug, Clone)]
 pub struct HostInputState {
     config: HostInputConfig,
@@ -1185,8 +1185,10 @@ mod tests {
 
     #[test]
     fn capacity_drops_pointer_moves_before_transitions() {
-        let mut config = InputQueueConfig::default();
-        config.max_objects = 2;
+        let config = InputQueueConfig {
+            max_objects: 2,
+            ..InputQueueConfig::default()
+        };
         let mut queue = ViewerInputQueue::new(config, 1);
         queue.push_pointer_move(vec![0], 0);
         queue.push_key(65, true, false, vec![0], 0);
@@ -1208,9 +1210,11 @@ mod tests {
 
     #[test]
     fn releases_survive_capacity_pressure() {
-        let mut config = InputQueueConfig::default();
-        config.max_objects = 2;
-        config.max_bytes = 64;
+        let config = InputQueueConfig {
+            max_objects: 2,
+            max_bytes: 64,
+            ..InputQueueConfig::default()
+        };
         let mut queue = ViewerInputQueue::new(config, 1);
         for _ in 0..8 {
             queue.push_key(65, false, false, vec![0; 20], 0);
@@ -1352,7 +1356,8 @@ mod tests {
         sender.on_park(1_000);
         assert_eq!(sender.poll_timeout_ms(1_000), Some(KEY_RELEASE_GRACE_MS));
         assert!(
-            sender.poll_grace_release(1_000 + KEY_RELEASE_GRACE_MS - 1)
+            sender
+                .poll_grace_release(1_000 + KEY_RELEASE_GRACE_MS - 1)
                 .is_none()
         );
         let release = sender
@@ -1390,15 +1395,23 @@ mod tests {
         let mut sender = HostInputState::new(HostInputConfig::default());
         let envelope = GatewayInputEnvelope::new(9, 0, InputKind::Key, InputFlags::NONE, vec![0]);
         assert!(sender.submit(&envelope, 0).accepted);
-        assert!(!sender.submit(&envelope, 0).accepted, "duplicate in epoch 0");
+        assert!(
+            !sender.submit(&envelope, 0).accepted,
+            "duplicate in epoch 0"
+        );
         sender.set_epoch(1);
-        assert!(sender.submit(&envelope, 0).accepted, "epoch 1 is a new space");
+        assert!(
+            sender.submit(&envelope, 0).accepted,
+            "epoch 1 is a new space"
+        );
     }
 
     #[test]
     fn worker_coalesces_moves_when_full_and_keeps_releases() {
-        let mut config = HostInputConfig::default();
-        config.worker_capacity = 4;
+        let config = HostInputConfig {
+            worker_capacity: 4,
+            ..HostInputConfig::default()
+        };
         let mut sender = HostInputState::new(config);
         for seq in 1..=4u64 {
             let envelope = GatewayInputEnvelope::new(
