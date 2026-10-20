@@ -120,18 +120,18 @@ fn the_floor_is_never_crossed() {
     let now = Instant::now();
     // A link that keeps delivering despite 60 % loss: the goodput term holds
     // the pace at what the link demonstrably carries, never below the floor.
-    let mut lossy_link = BandwidthEstimator::new(BweConfig::default());
+    let mut estimator = BandwidthEstimator::new(BweConfig::default());
     for _ in 0..100 {
-        lossy_link.on_feedback(&lossy(1_400, 10_000, 0.6), now);
+        estimator.on_feedback(&lossy(1_400, 10_000, 0.6), now);
     }
     assert!(matches!(
-        lossy_link.mode(),
+        estimator.mode(),
         BweMode::Degraded | BweMode::Floor
     ));
     assert!(
-        (8_000..=12_000).contains(&lossy_link.pace_bps()),
+        (8_000..=12_000).contains(&estimator.pace_bps()),
         "pace {}",
-        lossy_link.pace_bps()
+        estimator.pace_bps()
     );
     // A link that delivers nothing at all reaches the floor and stays there.
     let mut dead = BandwidthEstimator::new(BweConfig::default());
