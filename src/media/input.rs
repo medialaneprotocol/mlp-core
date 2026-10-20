@@ -1,6 +1,6 @@
 //! Input path (MLP spec §9, D-8): receiver queue and sender-side policy.
 //!
-//! Input rides the control lane with an [`GatewayInputEnvelope`] wrapper. Two
+//! Input rides the control lane with an [`MediaInputEnvelope`] wrapper. Two
 //! machines live here:
 //!
 //! * [`ViewerInputQueue`] — bounded (64 objects / 8 KiB), deadline-aware,
@@ -28,7 +28,7 @@ pub const KEY_RELEASE_GRACE_MS: u64 = 2_000;
 /// Wheel accumulation ceiling in notches (MLP spec §13).
 pub const WHEEL_DELTA_CAP: i32 = 8;
 
-/// The `kind` field of `GatewayInputEnvelope` (MLP spec §13).
+/// The `kind` field of `MediaInputEnvelope` (MLP spec §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum InputKind {
@@ -88,7 +88,7 @@ impl InputKind {
     }
 }
 
-/// The `flags` field of `GatewayInputEnvelope` (MLP spec §13).
+/// The `flags` field of `MediaInputEnvelope` (MLP spec §13).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InputFlags(u8);
 
@@ -143,9 +143,9 @@ impl core::fmt::Debug for InputFlags {
     }
 }
 
-/// The `GatewayInputEnvelope` (MLP spec §13).
+/// The `MediaInputEnvelope` (MLP spec §13).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GatewayInputEnvelope {
+pub struct MediaInputEnvelope {
     /// Monotonic per receiver epoch; the dedup boundary.
     pub input_seq: u64,
     /// Session-relative absolute deadline; `0` never expires.
@@ -158,7 +158,7 @@ pub struct GatewayInputEnvelope {
     pub payload: Vec<u8>,
 }
 
-impl GatewayInputEnvelope {
+impl MediaInputEnvelope {
     /// Create an envelope.
     pub fn new(
         input_seq: u64,
@@ -391,7 +391,7 @@ pub enum PushOutcome {
 #[derive(Debug, Clone)]
 pub struct ViewerInputQueue {
     config: InputQueueConfig,
-    queue: VecDeque<GatewayInputEnvelope>,
+    queue: VecDeque<MediaInputEnvelope>,
     bytes: usize,
     next_seq: u64,
     connected: bool,
@@ -578,7 +578,7 @@ impl ViewerInputQueue {
     ///
     /// The wheel accumulator materializes here so its sequence number is
     /// assigned in send order.
-    pub fn take_ready(&mut self, now_ms: u64) -> Vec<GatewayInputEnvelope> {
+    pub fn take_ready(&mut self, now_ms: u64) -> Vec<MediaInputEnvelope> {
         self.last_now_ms = now_ms;
         self.expire(now_ms);
         if self.wheel_delta != 0 {
@@ -589,7 +589,7 @@ impl ViewerInputQueue {
         }
         self.pointer_slot = None;
         self.clipboard_slot = None;
-        let mut ready: Vec<GatewayInputEnvelope> = self.queue.drain(..).collect();
+        let mut ready: Vec<MediaInputEnvelope> = self.queue.drain(..).collect();
         self.bytes = 0;
         ready.sort_by_key(|envelope| envelope.input_seq);
         ready
@@ -597,7 +597,7 @@ impl ViewerInputQueue {
 
     /// Replay for a resume: queued objects in sequence order plus one
     /// pressed-set object (MLP spec §13).
-    pub fn replay(&mut self, now_ms: u64) -> Vec<GatewayInputEnvelope> {
+    pub fn replay(&mut self, now_ms: u64) -> Vec<MediaInputEnvelope> {
         let mut ready = self.take_ready(now_ms);
         ready.push(self.pressed_set_envelope(now_ms));
         self.next_pressed_heartbeat_ms = now_ms + self.config.pressed_heartbeat_ms;
@@ -605,7 +605,7 @@ impl ViewerInputQueue {
     }
 
     /// A pressed-set object carrying the receiver's current pressed set.
-    pub fn pressed_set_envelope(&mut self, now_ms: u64) -> GatewayInputEnvelope {
+    pub fn pressed_set_envelope(&mut self, now_ms: u64) -> MediaInputEnvelope {
         let (keys, buttons) = self.pressed_set();
         let payload = encode_pressed_set(&keys, &buttons);
         self.make(InputKind::PressedSet, InputFlags::CRITICAL, payload, now_ms)
@@ -617,7 +617,7 @@ impl ViewerInputQueue {
     }
 
     /// Emit the heartbeat when due.
-    pub fn poll_pressed_heartbeat(&mut self, now_ms: u64) -> Option<GatewayInputEnvelope> {
+    pub fn poll_pressed_heartbeat(&mut self, now_ms: u64) -> Option<MediaInputEnvelope> {
         if !self.pressed_heartbeat_due(now_ms) {
             return None;
         }
@@ -636,17 +636,17 @@ impl ViewerInputQueue {
         flags: InputFlags,
         payload: Vec<u8>,
         now_ms: u64,
-    ) -> GatewayInputEnvelope {
+    ) -> MediaInputEnvelope {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.last_now_ms = now_ms;
-        GatewayInputEnvelope::new(seq, now_ms + self.config.deadline_ms, kind, flags, payload)
+        MediaInputEnvelope::new(seq, now_ms + self.config.deadline_ms, kind, flags, payload)
     }
 
     /// Queue one object, making room per the class rules. `false` when the
     /// object was refused (every queued object was critical and this one is
     /// not).
-    fn enqueue(&mut self, envelope: GatewayInputEnvelope, now_ms: u64) -> bool {
+    fn enqueue(&mut self, envelope: MediaInputEnvelope, now_ms: u64) -> bool {
         let len = envelope.wire_len();
         loop {
             let fits = self.queue.len() < self.config.max_objects
@@ -836,7 +836,7 @@ pub struct HostInputState {
     seen_set: HashSet<(u32, u64)>,
     last_applied_seq: u64,
     pressed: BTreeSet<InputToken>,
-    worker: VecDeque<GatewayInputEnvelope>,
+    worker: VecDeque<MediaInputEnvelope>,
     parked_at_ms: Option<u64>,
     applied: u64,
     expired: u64,
@@ -910,7 +910,7 @@ impl HostInputState {
     }
 
     /// Offer one input envelope.
-    pub fn submit(&mut self, envelope: &GatewayInputEnvelope, now_ms: u64) -> InputOutcome {
+    pub fn submit(&mut self, envelope: &MediaInputEnvelope, now_ms: u64) -> InputOutcome {
         let mut releases = Vec::new();
         // Deadline enforcement: releases and pressed sets are always applied.
         if envelope.is_expired(now_ms) && !envelope.is_always_applied() {
@@ -1016,7 +1016,7 @@ impl HostInputState {
     }
 
     /// Drain up to `max` objects for the injection worker.
-    pub fn drain_worker(&mut self, max: usize) -> Vec<GatewayInputEnvelope> {
+    pub fn drain_worker(&mut self, max: usize) -> Vec<MediaInputEnvelope> {
         let take = max.min(self.worker.len());
         self.worker.drain(..take).collect()
     }
@@ -1035,7 +1035,7 @@ impl HostInputState {
         InputRelease { tokens, reason }
     }
 
-    fn note_pressed(&mut self, envelope: &GatewayInputEnvelope) {
+    fn note_pressed(&mut self, envelope: &MediaInputEnvelope) {
         match envelope.kind {
             InputKind::Key => {
                 // The payload's action is owned by the driver; the transport
@@ -1060,7 +1060,7 @@ impl HostInputState {
 
     fn enqueue_worker(
         &mut self,
-        envelope: &GatewayInputEnvelope,
+        envelope: &MediaInputEnvelope,
         now_ms: u64,
         accepted: &mut bool,
         reject: &mut Option<HostInputReject>,
@@ -1278,15 +1278,15 @@ mod tests {
     #[test]
     fn host_dedupes_and_rejects_stale_sequences() {
         let mut sender = HostInputState::new(HostInputConfig::default());
-        let first = GatewayInputEnvelope::new(5, 0, InputKind::Key, InputFlags::NONE, vec![0]);
+        let first = MediaInputEnvelope::new(5, 0, InputKind::Key, InputFlags::NONE, vec![0]);
         assert!(sender.submit(&first, 0).accepted);
         let duplicate = sender.submit(&first, 0);
         assert!(!duplicate.accepted);
         assert_eq!(duplicate.reject, Some(HostInputReject::Duplicate));
-        let stale = GatewayInputEnvelope::new(4, 0, InputKind::Key, InputFlags::NONE, vec![0]);
+        let stale = MediaInputEnvelope::new(4, 0, InputKind::Key, InputFlags::NONE, vec![0]);
         let outcome = sender.submit(&stale, 0);
         assert_eq!(outcome.reject, Some(HostInputReject::StaleSeq));
-        let newer = GatewayInputEnvelope::new(6, 0, InputKind::Key, InputFlags::NONE, vec![0]);
+        let newer = MediaInputEnvelope::new(6, 0, InputKind::Key, InputFlags::NONE, vec![0]);
         assert!(sender.submit(&newer, 0).accepted);
         let (applied, _, deduped, stale_seq, _, _) = sender.counters();
         assert_eq!(applied, 2);
@@ -1298,13 +1298,13 @@ mod tests {
     fn host_expires_objects_but_always_applies_releases() {
         let mut sender = HostInputState::new(HostInputConfig::default());
         let expired_move =
-            GatewayInputEnvelope::new(1, 100, InputKind::PointerMove, InputFlags::NONE, vec![0]);
+            MediaInputEnvelope::new(1, 100, InputKind::PointerMove, InputFlags::NONE, vec![0]);
         let outcome = sender.submit(&expired_move, 200);
         assert_eq!(outcome.reject, Some(HostInputReject::Expired));
         let expired_release =
-            GatewayInputEnvelope::new(2, 100, InputKind::Key, InputFlags::RELEASE, vec![0]);
+            MediaInputEnvelope::new(2, 100, InputKind::Key, InputFlags::RELEASE, vec![0]);
         assert!(sender.submit(&expired_release, 200).accepted);
-        let expired_pressed_set = GatewayInputEnvelope::new(
+        let expired_pressed_set = MediaInputEnvelope::new(
             3,
             100,
             InputKind::PressedSet,
@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn pressed_set_releases_keys_the_host_believes_held() {
         let mut sender = HostInputState::new(HostInputConfig::default());
-        let set = GatewayInputEnvelope::new(
+        let set = MediaInputEnvelope::new(
             1,
             0,
             InputKind::PressedSet,
@@ -1327,7 +1327,7 @@ mod tests {
         assert!(sender.submit(&set, 0).accepted);
         assert_eq!(sender.pressed().len(), 3);
         // A later set without key 17 releases it.
-        let narrower = GatewayInputEnvelope::new(
+        let narrower = MediaInputEnvelope::new(
             2,
             0,
             InputKind::PressedSet,
@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn park_releases_after_the_grace_and_cancels_on_resume() {
         let mut sender = HostInputState::new(HostInputConfig::default());
-        let set = GatewayInputEnvelope::new(
+        let set = MediaInputEnvelope::new(
             1,
             0,
             InputKind::PressedSet,
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn session_end_releases_everything() {
         let mut sender = HostInputState::new(HostInputConfig::default());
-        let set = GatewayInputEnvelope::new(
+        let set = MediaInputEnvelope::new(
             1,
             0,
             InputKind::PressedSet,
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn epoch_change_clears_the_dedup_boundary() {
         let mut sender = HostInputState::new(HostInputConfig::default());
-        let envelope = GatewayInputEnvelope::new(9, 0, InputKind::Key, InputFlags::NONE, vec![0]);
+        let envelope = MediaInputEnvelope::new(9, 0, InputKind::Key, InputFlags::NONE, vec![0]);
         assert!(sender.submit(&envelope, 0).accepted);
         assert!(
             !sender.submit(&envelope, 0).accepted,
@@ -1414,28 +1414,23 @@ mod tests {
         };
         let mut sender = HostInputState::new(config);
         for seq in 1..=4u64 {
-            let envelope = GatewayInputEnvelope::new(
-                seq,
-                0,
-                InputKind::PointerMove,
-                InputFlags::NONE,
-                vec![0],
-            );
+            let envelope =
+                MediaInputEnvelope::new(seq, 0, InputKind::PointerMove, InputFlags::NONE, vec![0]);
             assert!(sender.submit(&envelope, 0).accepted);
         }
         assert_eq!(sender.worker_depth(), 4);
         // Full: the move coalesces into the existing slot.
         let move_envelope =
-            GatewayInputEnvelope::new(5, 0, InputKind::PointerMove, InputFlags::NONE, vec![9]);
+            MediaInputEnvelope::new(5, 0, InputKind::PointerMove, InputFlags::NONE, vec![9]);
         assert!(sender.submit(&move_envelope, 0).accepted);
         assert_eq!(sender.worker_depth(), 4);
         assert_eq!(sender.counters().5, 1, "coalesced");
         // A release is never refused.
-        let release = GatewayInputEnvelope::new(6, 0, InputKind::Key, InputFlags::RELEASE, vec![0]);
+        let release = MediaInputEnvelope::new(6, 0, InputKind::Key, InputFlags::RELEASE, vec![0]);
         assert!(sender.submit(&release, 0).accepted);
         // A clipboard object is refused when full and non-critical.
         let clipboard =
-            GatewayInputEnvelope::new(7, 0, InputKind::Clipboard, InputFlags::NONE, vec![0]);
+            MediaInputEnvelope::new(7, 0, InputKind::Clipboard, InputFlags::NONE, vec![0]);
         let outcome = sender.submit(&clipboard, 0);
         assert!(!outcome.accepted);
         assert_eq!(outcome.reject, Some(HostInputReject::QueueFull));
@@ -1447,7 +1442,7 @@ mod tests {
         // set is empty after park + grace, session end, or a full pressed set.
         for path in 0..3 {
             let mut sender = HostInputState::new(HostInputConfig::default());
-            let pressed = GatewayInputEnvelope::new(
+            let pressed = MediaInputEnvelope::new(
                 1,
                 0,
                 InputKind::PressedSet,
@@ -1465,7 +1460,7 @@ mod tests {
                     sender.on_session_end();
                 }
                 _ => {
-                    let empty = GatewayInputEnvelope::new(
+                    let empty = MediaInputEnvelope::new(
                         2,
                         0,
                         InputKind::PressedSet,

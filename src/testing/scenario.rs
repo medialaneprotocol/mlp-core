@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::media::cells::{CellGrid, CellRect};
 use crate::media::input::{
-    GatewayInputEnvelope, HostInputConfig, HostInputState, InputFlags, InputKind as InputEventKind,
-    InputQueueConfig, InputToken, ViewerInputQueue, decode_pressed_set, encode_pressed_set,
+    HostInputConfig, HostInputState, InputFlags, InputKind as InputEventKind, InputQueueConfig,
+    InputToken, MediaInputEnvelope, ViewerInputQueue, decode_pressed_set, encode_pressed_set,
 };
 use crate::media::lifecycle::MediaLaneStateKind;
 use crate::media::pdu::{Carrier, Fragment, FragmentClass, FragmentFlags, Priority};
@@ -1300,7 +1300,7 @@ impl Sim {
         }
     }
 
-    fn host_input_arrive(&mut self, envelope: GatewayInputEnvelope) {
+    fn host_input_arrive(&mut self, envelope: MediaInputEnvelope) {
         let now_ms = self.now_ms;
         let seq = envelope.input_seq;
         let expired_non_release = envelope.is_expired(now_ms) && !envelope.is_always_applied();
@@ -1722,7 +1722,7 @@ impl Sim {
     }
 }
 
-impl GatewayInputEnvelope {
+impl MediaInputEnvelope {
     /// Whether this envelope releases everything (a simulation convenience).
     fn is_release_all(&self) -> bool {
         matches!(self.kind, InputEventKind::ReleaseAll)
@@ -1849,7 +1849,7 @@ fn decode_echo(payload: &[u8]) -> Option<crate::media::ProbeEcho> {
     })
 }
 
-fn encode_input(envelope: &GatewayInputEnvelope) -> Vec<u8> {
+fn encode_input(envelope: &MediaInputEnvelope) -> Vec<u8> {
     let mut out = b"inp".to_vec();
     out.extend_from_slice(&envelope.input_seq.to_le_bytes());
     out.extend_from_slice(&envelope.deadline_epoch_ms.to_le_bytes());
@@ -1860,7 +1860,7 @@ fn encode_input(envelope: &GatewayInputEnvelope) -> Vec<u8> {
     out
 }
 
-fn decode_input(payload: &[u8]) -> Option<GatewayInputEnvelope> {
+fn decode_input(payload: &[u8]) -> Option<MediaInputEnvelope> {
     if payload.len() < 3 || &payload[0..3] != b"inp" || payload.len() < 3 + 25 {
         return None;
     }
@@ -1895,7 +1895,7 @@ fn decode_input(payload: &[u8]) -> Option<GatewayInputEnvelope> {
     if payload.len() < 28 + len {
         return None;
     }
-    Some(GatewayInputEnvelope {
+    Some(MediaInputEnvelope {
         input_seq,
         deadline_epoch_ms,
         kind,

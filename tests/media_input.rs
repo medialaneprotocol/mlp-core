@@ -2,9 +2,9 @@
 //! dedup, the pressed-set protocol and INV-3/INV-4.
 
 use mlp_core::media::input::{
-    GatewayInputEnvelope, HOST_WORKER_CAPACITY, HostInputConfig, HostInputReject, HostInputState,
-    INPUT_DEADLINE_MS, INPUT_DEDUP_WINDOW, INPUT_QUEUE_BYTES, INPUT_QUEUE_OBJECTS, InputDropReason,
-    InputFlags, InputKind, InputQueueConfig, InputToken, KEY_RELEASE_GRACE_MS, PushOutcome,
+    HOST_WORKER_CAPACITY, HostInputConfig, HostInputReject, HostInputState, INPUT_DEADLINE_MS,
+    INPUT_DEDUP_WINDOW, INPUT_QUEUE_BYTES, INPUT_QUEUE_OBJECTS, InputDropReason, InputFlags,
+    InputKind, InputQueueConfig, InputToken, KEY_RELEASE_GRACE_MS, MediaInputEnvelope, PushOutcome,
     ReleaseReason, ViewerInputQueue, decode_pressed_set, encode_pressed_set,
 };
 
@@ -12,12 +12,12 @@ fn queue() -> ViewerInputQueue {
     ViewerInputQueue::new(InputQueueConfig::default(), 1)
 }
 
-fn envelope(seq: u64, kind: InputKind, flags: InputFlags, deadline: u64) -> GatewayInputEnvelope {
-    GatewayInputEnvelope::new(seq, deadline, kind, flags, vec![0; 8])
+fn envelope(seq: u64, kind: InputKind, flags: InputFlags, deadline: u64) -> MediaInputEnvelope {
+    MediaInputEnvelope::new(seq, deadline, kind, flags, vec![0; 8])
 }
 
-fn pressed_set_seq(seq: u64, keys: &[u32], buttons: &[u32]) -> GatewayInputEnvelope {
-    GatewayInputEnvelope::new(
+fn pressed_set_seq(seq: u64, keys: &[u32], buttons: &[u32]) -> MediaInputEnvelope {
+    MediaInputEnvelope::new(
         seq,
         0,
         InputKind::PressedSet,
