@@ -2,8 +2,7 @@
 
 The tool is the Media Lane Protocol's front door: it builds and reads the
 bytes the protocol defines, assembles objects, builds and reads the receiver's
-acknowledgement, prints the protocol's hard limits, and runs the published
-conformance corpus against a build.
+acknowledgement, and prints the protocol's hard limits.
 
 ```sh
 cargo build --release            # the library and the tool
@@ -24,7 +23,6 @@ mlp-core <command> [flags]
 | `ack build` | build the receiver's acknowledgement and print its bytes |
 | `ack inspect` | read an acknowledgement's bytes and print its fields and its window |
 | `limits` | print the protocol's hard limits: the caps, the timeouts, the invariants |
-| `conformance` | run the published conformance corpus against this build |
 
 Every command accepts `--json`, and every command's `--help` prints its
 flags and a worked example.
@@ -36,7 +34,7 @@ The status is a contract, and it is the same for every command:
 | status | meaning |
 |---|---|
 | `0` | the command succeeded |
-| `1` | the check failed — a corpus verdict, or a measurement past its budget |
+| `1` | the check failed — a measurement past its budget |
 | `2` | the usage was wrong — an unknown verb, a missing or unknown flag |
 | `3` | the input could not be read — bad hex, a truncated fragment, a body that does not decode |
 
@@ -225,48 +223,6 @@ invariant; `unit` is `null` for a rule.
 
 Every numeric cap is the crate's own constant, so the table cannot drift
 from the code that enforces it.
-
-### `conformance`
-
-```json
-{
-  "command": "conformance",
-  "corpus": "../mlp-conformance",
-  "scenarios": [
-    {
-      "id": "s14-t0-baseline",
-      "verdict": "match",
-      "expected_digest": "1e1945c0f1ad9284",
-      "actual_digest": "1e1945c0f1ad9284",
-      "violations": 0,
-      "duration_ms": 2000,
-      "detail": null
-    }
-  ],
-  "summary": { "total": 16, "matched": 16, "failed": 0 }
-}
-```
-
-`verdict` is `match`, `mismatch`, `missing` or `error`. A scenario that
-does not match its committed digest is a failed check: the command exits
-with the status `1`.
-
-## The corpus
-
-The corpus is a sibling repository —
-[`mlp-conformance`](https://github.com/medialaneprotocol/mlp-conformance) —
-and the tool reads it. It is never copied into this repository.
-
-```sh
-mlp-core conformance --corpus ../mlp-conformance
-```
-
-The command reads the corpus's committed scenarios and link profiles,
-replays each one through this build's simulator, and compares the decision
-trace it produces with the trace the corpus committed. The corpus's own gate
-is the authority on the corpus; this command is the authority on the build.
-
-`MLP_CONFORMANCE_DIR` names the corpus when `--corpus` is not given.
 
 ## The digests
 

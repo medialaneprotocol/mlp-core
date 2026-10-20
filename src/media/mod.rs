@@ -16,8 +16,8 @@
 //!
 //! The class bodies of MLP spec §7.2/§7.3 are plain Rust structs here; drivers
 //! carry them across the wire with the service's protobuf definitions. Keeping
-//! them dependency-free is what lets the deterministic simulator in
-//! [`crate::testing`] exercise every decision without a runtime.
+//! them dependency-free is what lets the protocol's verification layer
+//! exercise every decision without a runtime.
 
 pub mod bwe;
 pub mod cells;
@@ -42,8 +42,8 @@ pub use pdu::{
 };
 pub use receiver::{MediaReceiveEvent, MediaReceiverConfig, MediaReceiverMachine, ReceiverStats};
 pub use sender::{
-    EnqueueOutcome, MediaSenderConfig, MediaSenderEvent, MediaSenderMachine, SenderStats,
-    UpdateRequest,
+    EnqueueOutcome, MediaSenderConfig, MediaSenderEvent, MediaSenderInput, MediaSenderMachine,
+    SenderStats, UpdateRequest,
 };
 
 use serde::{Deserialize, Serialize};

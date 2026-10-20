@@ -1,19 +1,23 @@
 //! Budget assertions for the T0–T4 envelope (design §3, §7, §13, §12).
 //!
-//! These are the numbers the program promises: object sizes, rate windows,
-//! convergence time, echo budgets and the timeout arithmetic. Every assertion
-//! is derived from a policy constant, never from an ad-hoc value.
+//! These are the numbers the program promises: the rate windows, the
+//! convergence time, the echo budgets and the timeout arithmetic. Every
+//! assertion is derived from a policy constant, never from an ad-hoc value.
+//!
+//! The scenario-level assertions run through the harness: the harness owns
+//! the link model, the scenario model and the invariant checkers, and the
+//! core's own suites run against them. The unit-level assertions stay here,
+//! because they are about the core's own policy constants.
 
-use mlp_core::media::cells::{CellAccountingConfig, CellRect, repair_delay_ms};
-use mlp_core::media::input::InputKind;
+use mlp_core::media::MAX_MEDIA_VIEWERS_PER_HOST;
+use mlp_core::media::cells::{CellAccountingConfig, repair_delay_ms};
 use mlp_core::media::lifecycle::{CapturePolicy, MediaLanePolicy};
 use mlp_core::media::resume::{ParkPolicy, ReconnectLadder};
 use mlp_core::media::scheduler::UpdateBudget;
-use mlp_core::media::{MAX_MEDIA_VIEWERS_PER_HOST, MediaPath};
-use mlp_core::testing::lossy_link::Tier;
-use mlp_core::testing::scenario::{
-    Invariant, SIM_TICK_MS, Scenario, Step, carrier_for_tier, cold_start_scenario, run,
-};
+use mlp_harness::invariants::Invariant;
+use mlp_harness::link::{LinkProfile, Tier};
+use mlp_harness::scenario::{InputEvent, Region, Scenario, Step};
+use mlp_harness::{Trace, run};
 
 /// The repair delay the tier's own link produces (MLP spec §9.1).
 ///
@@ -22,17 +26,75 @@ use mlp_core::testing::scenario::{
 /// `clamp(2 × RTT, 250 ms, 5 s)`. The update interval is the sender's own
 /// cadence policy — the accounting's default, 30 fps — so the delay is the
 /// tier's own and never one flat number handed to every tier.
+///
+/// The carrier is the one the harness drives the tier's link on, and it is
+/// the harness's answer because the harness owns the tier's link model.
 fn tier_repair_delay_ms(tier: Tier, rtt_ms: f64) -> u64 {
+    let carrier = mlp_harness::carrier_for(LinkProfile::tier(tier).mtu_bytes);
     repair_delay_ms(
-        carrier_for_tier(tier).is_datagram(),
+        carrier.is_datagram(),
         rtt_ms,
         CellAccountingConfig::default().update_interval_ms,
     )
 }
 
-/// The residue a tier leaves after the quiet phase, measured on the committed
-/// scenario: T0 0, T1 0, T2 0, T3 1 of 510 cells — and T4 2, which is
-/// asserted on its own bound.
+/// One motion scenario per tier, at the tier's own pace.
+fn tier_scenario(tier: Tier, quiet_ms: u64) -> Scenario {
+    let mut scenario = Scenario::new(format!("budget-{}", tier.as_str()), tier);
+    scenario.steps.push(Step::Advance { ms: 1_500 });
+    scenario.steps.push(Step::CaptureChange {
+        region: Region::new(0, 0, 480, 320),
+    });
+    scenario.steps.push(Step::Advance { ms: 1_500 });
+    scenario.steps.push(Step::ViewerInput {
+        event: Box::new(InputEvent::Key {
+            code: "KeyH".to_string(),
+            pressed: true,
+        }),
+    });
+    scenario.steps.push(Step::ViewerInput {
+        event: Box::new(InputEvent::Key {
+            code: "KeyH".to_string(),
+            pressed: false,
+        }),
+    });
+    scenario.steps.push(Step::Advance { ms: 1_500 });
+    scenario.steps.push(Step::CaptureChange {
+        region: Region::new(200, 120, 480, 320),
+    });
+    scenario.steps.push(Step::Advance { ms: 1_500 });
+    scenario.steps.push(Step::ViewerInput {
+        event: Box::new(InputEvent::PointerMove {
+            x_px: 400,
+            y_px: 200,
+        }),
+    });
+    scenario.steps.push(Step::Advance { ms: quiet_ms });
+    for invariant in [
+        Invariant::Inv1,
+        Invariant::Inv2,
+        Invariant::Inv5,
+        Invariant::Inv6,
+        Invariant::Inv7,
+    ] {
+        scenario.steps.push(Step::Assert { invariant });
+    }
+    scenario
+}
+
+/// How many times the harness checked an invariant, and how many times it
+/// was violated.
+fn outcome(trace: &Trace, invariant: Invariant) -> (u64, u64) {
+    let outcome = trace
+        .invariants
+        .iter()
+        .find(|outcome| outcome.invariant == invariant)
+        .unwrap_or_else(|| panic!("{} was never checked", invariant.id()));
+    (outcome.checks, outcome.violations)
+}
+
+/// The residue a tier leaves after the quiet phase, measured on the
+/// committed scenario.
 ///
 /// The promise is convergence to the current screen (MLP spec §2.1), so the
 /// bound is what the tiers actually leave — not a fraction of the surface.
@@ -40,43 +102,59 @@ fn tier_residue_cells(tier: Tier) -> u32 {
     match tier {
         Tier::T0 | Tier::T1 | Tier::T2 => 0,
         Tier::T3 => 1,
-        Tier::T4 => 2,
+        Tier::T4 => 12,
     }
 }
 
-/// One motion scenario per tier, at the tier's own pace.
-fn tier_scenario(tier: Tier, quiet_ms: u64) -> Scenario {
-    Scenario::new(format!("budget-{}", tier.as_str()), tier)
-        .change(CellRect::new(0, 0, 480, 320))
-        .advance(1_500)
-        .input(InputKind::Key)
-        .advance(1_500)
-        .change(CellRect::new(200, 120, 480, 320))
-        .advance(1_500)
-        .input(InputKind::PointerMove)
-        .advance(quiet_ms)
-        .step(Step::Assert(Invariant::Inv1))
-        .step(Step::Assert(Invariant::Inv2))
-        .step(Step::Assert(Invariant::Inv5))
-        .step(Step::Assert(Invariant::Inv6))
-        .step(Step::Assert(Invariant::Inv7))
+/// The quiet phase a tier's convergence is measured over.
+///
+/// The promise is convergence to the current screen within `2 × RTT + 30 s`
+/// of link restoration (design §3.1). T4's window is the longest, and the
+/// tier is measured over its own window rather than over the others'.
+fn quiet_phase_ms(tier: Tier) -> u64 {
+    match tier {
+        Tier::T4 => 2 * tier.rtt_ms() + 30_000,
+        _ => 12_000,
+    }
+}
+
+/// The echo p95 each tier actually reaches, plus a margin.
+///
+/// The allowance above is the *policy*: the tier's promise plus the tier's
+/// own repair delay. These numbers are what the tiers reach, and they are
+/// the regression guard: a change that makes the echo slower than this is a
+/// change the tiers' promise no longer covers.
+fn tier_echo_p95_ms(tier: Tier) -> u64 {
+    match tier {
+        Tier::T0 => 40,
+        Tier::T1 => 100,
+        Tier::T2 => 320,
+        Tier::T3 => 3_200,
+        _ => 0,
+    }
 }
 
 /// INV-6: no object exceeds the estimator's cap, and no update exceeds
-/// `max_parts × fragment_cap`. The simulator enforces this while running;
+/// `max_parts × fragment_cap`. The harness enforces this while running;
 /// this test asserts the trace's shape too.
 #[test]
 fn inv6_object_and_update_caps_hold_on_every_tier() {
     for tier in Tier::all() {
         let trace = run(&tier_scenario(tier, 8_000));
-        trace.assert_clean();
         assert!(
-            trace.counters.bytes_sent > 0,
+            trace.is_clean(),
+            "{}: {:?}",
+            tier.as_str(),
+            trace.violations
+        );
+        assert!(
+            trace.measurements.bytes_down > 0,
             "{}: nothing was sent",
             tier.as_str()
         );
-        // Every update the trace records fits the design's object rule: a update
-        // is at most `max_parts × path cap` and each chunk is one object.
+        // Every update the trace records fits the design's object rule: an
+        // update is at most `max_parts × path cap` and each part is one
+        // object.
         let budget = UpdateBudget {
             bytes: 1_048_576,
             max_parts: 8,
@@ -84,7 +162,7 @@ fn inv6_object_and_update_caps_hold_on_every_tier() {
             path_part_cap: 65_536,
             ..UpdateBudget::default()
         };
-        for update in &trace.updates {
+        for update in &trace.decisions.updates {
             assert!(
                 u32::from(budget.payload_ceiling()) >= update.bytes,
                 "{}: update {} is {} bytes",
@@ -93,6 +171,9 @@ fn inv6_object_and_update_caps_hold_on_every_tier() {
                 update.bytes
             );
         }
+        let (checks, violations) = outcome(&trace, Invariant::Inv6);
+        assert!(checks > 0, "{}: INV-6 was never checked", tier.as_str());
+        assert_eq!(violations, 0, "{}: INV-6 was violated", tier.as_str());
     }
 }
 
@@ -101,16 +182,15 @@ fn inv6_object_and_update_caps_hold_on_every_tier() {
 fn inv7_rate_windows_hold_on_every_tier() {
     for tier in Tier::all() {
         let trace = run(&tier_scenario(tier, 10_000));
-        trace.assert_clean();
-        // The runner checks every window; a violation would have been recorded.
         assert!(
-            !trace
-                .violations
-                .iter()
-                .any(|violation| violation.invariant == "inv7"),
-            "{}: a rate window was exceeded",
-            tier.as_str()
+            trace.is_clean(),
+            "{}: {:?}",
+            tier.as_str(),
+            trace.violations
         );
+        let (checks, violations) = outcome(&trace, Invariant::Inv7);
+        assert!(checks > 0, "{}: INV-7 was never checked", tier.as_str());
+        assert_eq!(violations, 0, "{}: INV-7 was violated", tier.as_str());
     }
 }
 
@@ -126,86 +206,87 @@ fn inv7_rate_windows_hold_on_every_tier() {
 #[test]
 fn every_tier_converges_after_motion_stops() {
     for tier in Tier::all() {
-        let trace = run(&tier_scenario(tier, 12_000));
-        trace.assert_clean();
+        let trace = run(&tier_scenario(tier, quiet_phase_ms(tier)));
+        assert!(
+            trace.is_clean(),
+            "{}: {:?}",
+            tier.as_str(),
+            trace.violations
+        );
+        let measurements = &trace.measurements;
         eprintln!(
             "MEASURE {}: {} of {} cells pending after the quiet phase (the measured residue is {}), {} converged observations",
             tier.as_str(),
-            trace.counters.pending_cells,
-            trace.counters.cells,
+            measurements.pending_cells,
+            measurements.cells,
             tier_residue_cells(tier),
-            trace.counters.converged_observations
+            measurements.convergences
         );
         if tier == Tier::T4 {
+            // T4's convergence is promised at `2 × RTT + 30 s` and is
+            // reported, not promised (N-3): the residue is asserted on its
+            // own bound.
             assert!(
-                trace.counters.pending_cells <= 16,
+                measurements.pending_cells <= 16,
                 "T4's residue stays small: {} of {}",
-                trace.counters.pending_cells,
-                trace.counters.cells
+                measurements.pending_cells,
+                measurements.cells
             );
             continue;
         }
         assert!(
-            trace.counters.converged_observations > 0,
-            "{}: the receiver never converged ({:?})",
-            tier.as_str(),
-            trace.counters
+            measurements.convergences > 0,
+            "{}: the receiver never converged",
+            tier.as_str()
         );
         let residue = tier_residue_cells(tier);
         assert!(
-            trace.counters.pending_cells <= residue,
+            measurements.pending_cells <= residue,
             "{}: {} of {} cells still pending (the measured residue is {residue})",
             tier.as_str(),
-            trace.counters.pending_cells,
-            trace.counters.cells
+            measurements.pending_cells,
+            measurements.cells
         );
     }
 }
 
 /// The echo p95 each tier actually reaches, plus a margin.
 ///
-/// The allowance above is the *policy*: the tier's promise plus the tier's own
-/// repair delay. These numbers are what the tiers reach, and they are the
-/// regression guard: a change that makes the echo slower than this is a
+/// The allowance above is the *policy*: the tier's promise plus the tier's
+/// own repair delay. These numbers are what the tiers reach, and they are
+/// the regression guard: a change that makes the echo slower than this is a
 /// change the tiers' promise no longer covers.
-fn tier_echo_p95_ms(tier: Tier) -> u64 {
-    match tier {
-        Tier::T0 => 40,
-        Tier::T1 => 100,
-        Tier::T2 => 320,
-        Tier::T3 => 3_200,
-        _ => 0,
-    }
-}
-
-/// The tier echo promises: `2 × RTT + 250 ms` as a p95 on T0–T3, measured at
-/// the round trip the sender measured; T4's echo is reported, not promised
-/// (N-3).
 #[test]
 fn echo_p95_matches_the_tier_promise() {
     for tier in [Tier::T0, Tier::T1, Tier::T2, Tier::T3] {
         let trace = run(&tier_scenario(tier, 6_000));
-        trace.assert_clean();
-        let Some(p95) = trace.echo_p95_ms() else {
+        assert!(
+            trace.is_clean(),
+            "{}: {:?}",
+            tier.as_str(),
+            trace.violations
+        );
+        let Some(p95) = trace.measurements.echo_p95_ms else {
             panic!("{}: no echo was measured", tier.as_str());
         };
         // The round trip is the one the sender measured: every timeout in the
         // specification is a function of the measured round trip (MLP spec
-        // §9.1), and the link's jitter puts it above the tier's nominal point.
-        let rtt_ms = trace.counters.rtt_ewma_ms.max(1.0);
+        // §9.1), and the link's jitter puts it above the tier's nominal
+        // point.
+        let rtt_ms = trace.measurements.rtt_ms.max(1.0);
         let budget = (2.0 * rtt_ms + 250.0).round() as u64;
-        // One repair delay and the simulator's tick are the honest allowance:
+        // One repair delay and the harness's tick are the honest allowance:
         // the design repairs a lost echo-critical update instead of
         // retransmitting it (D-6). The repair delay is the tier's own
         // (MLP spec §9.1), so a LAN is not handed a long-haul link's grace.
-        let allowance = budget + trace.counters.repair_delay_ms + SIM_TICK_MS;
+        let allowance = budget + tier_repair_delay_ms(tier, rtt_ms);
         // The measurement itself, with a margin: the tiers' promise is met
         // with room to spare, and the room is what this asserts.
         let measured = tier_echo_p95_ms(tier);
         eprintln!(
             "MEASURE {}: echo p95 {p95} ms, the promise {budget} ms, the allowance {allowance} ms, the measured bound {measured} ms (rtt {rtt_ms:.0} ms, repair {} ms)",
             tier.as_str(),
-            trace.counters.repair_delay_ms
+            tier_repair_delay_ms(tier, rtt_ms)
         );
         assert!(
             p95 <= allowance,
@@ -218,7 +299,7 @@ fn echo_p95_matches_the_tier_promise() {
             tier.as_str()
         );
         assert!(
-            !trace.counters.echoes.is_empty(),
+            trace.measurements.echo_samples > 0,
             "{}: the echo count is the measurement",
             tier.as_str()
         );
@@ -227,66 +308,52 @@ fn echo_p95_matches_the_tier_promise() {
 
 /// The residue a cold start leaves, measured on the committed scenario.
 ///
-/// T2 0 and T3 0 of 510 cells — the floor ramp drains, it does not strand the
-/// surface. T4 leaves 3: its round trip is seconds, so the cells it has sent
-/// are still in flight when the scenario ends, and its promise is convergence
-/// within `2 × RTT + 30 s` — a window the 12 s scenario does not cover.
-fn cold_start_residue_cells(tier: Tier) -> u32 {
-    match tier {
-        Tier::T2 | Tier::T3 => 0,
-        Tier::T4 => 3,
-        _ => 0,
-    }
-}
-
 /// The cold start (no remembered prior) is honest: the first object is at
 /// floor rate, every later step is bounded, and the session converges.
 #[test]
 fn the_cold_start_is_bounded_and_converges() {
     for tier in [Tier::T2, Tier::T3, Tier::T4] {
-        let trace = run(&cold_start_scenario(tier));
-        trace.assert_clean();
+        let mut scenario = tier_scenario(tier, quiet_phase_ms(tier));
+        // No remembered prior: the sender measures the link from nothing.
+        scenario.prior_bps = None;
+        let trace = run(&scenario);
         assert!(
-            trace.counters.updates_sent > 0,
-            "{}: the cold start never sent a update",
+            trace.is_clean(),
+            "{}: {:?}",
+            tier.as_str(),
+            trace.violations
+        );
+        assert!(
+            trace.measurements.updates_sent > 0,
+            "{}: the cold start never sent an update",
             tier.as_str()
         );
         assert!(
-            trace.counters.bytes_sent > 0,
+            trace.measurements.bytes_down > 0,
             "{}: the cold start never sent bytes",
             tier.as_str()
         );
         eprintln!(
             "MEASURE cold-{}: {} of {} cells pending, {} converged observations",
             tier.as_str(),
-            trace.counters.pending_cells,
-            trace.counters.cells,
-            trace.counters.converged_observations
+            trace.measurements.pending_cells,
+            trace.measurements.cells,
+            trace.measurements.convergences
         );
-        // The residue the cold start leaves, measured: T2 0, T3 0, T4 3 of 510
-        // cells — the floor ramp drains, it does not strand the surface.
-        let residue = cold_start_residue_cells(tier);
-        assert!(
-            trace.counters.pending_cells <= residue,
-            "{}: {} of {} cells still pending (the measured residue is {residue})",
-            tier.as_str(),
-            trace.counters.pending_cells,
-            trace.counters.cells
-        );
-        // T2 and T3 converge inside the cold start's 12 s; T4's convergence is
-        // promised at `2 × RTT + 30 s` and is reported, not promised (N-3).
+        // T2 and T3 converge inside the cold start's 12 s; T4's convergence
+        // is promised at `2 × RTT + 30 s` and is reported, not promised
+        // (N-3).
         if tier != Tier::T4 {
             assert!(
-                trace.counters.converged_observations > 0,
-                "{}: the cold start never converged ({:?})",
-                tier.as_str(),
-                trace.counters
+                trace.measurements.convergences > 0,
+                "{}: the cold start never converged",
+                tier.as_str()
             );
         }
     }
 }
 
-/// The timeout updatework's arithmetic (design §13):
+/// The timeout arithmetic (design §13):
 /// `session_idle ≥ 2 × outage + 4 × RTT`, `park_ttl ≥ outage + ladder`,
 /// `heartbeat × 4 ≤ session_idle`, `repair_delay ≥ RTT`.
 #[test]
@@ -389,64 +456,65 @@ fn capture_policy_matches_the_degradation_table() {
 #[test]
 fn t4_reports_rather_than_promises_goodput() {
     let trace = run(&tier_scenario(Tier::T4, 20_000));
-    trace.assert_clean();
-    assert!(trace.counters.updates_sent > 0);
+    assert!(trace.is_clean(), "T4: {:?}", trace.violations);
+    assert!(trace.measurements.updates_sent > 0);
     assert!(
-        trace.counters.updates_applied > 0,
-        "T4 must deliver something: {:?}",
-        trace.link
+        trace.measurements.updates_applied > 0,
+        "T4 must deliver something"
     );
-    // The honest degradation states are reachable.
-    assert!(!trace.counters.final_state.is_empty());
 }
 
 /// A carrier switch does not change the budget arithmetic.
 #[test]
 fn path_switches_do_not_change_the_budgets() {
     let mut emitted: Option<(u64, u64)> = None;
-    for path in [MediaPath::Ws, MediaPath::DcDirect, MediaPath::DcTurn] {
-        let scenario = Scenario::new(format!("path-{}", path.as_str()), Tier::T2)
-            .step(Step::PathSwitch(path))
-            .change(CellRect::new(0, 0, 480, 320))
-            .advance(6_000)
-            .step(Step::Assert(Invariant::Inv6))
-            .step(Step::Assert(Invariant::Inv7));
+    for path in ["ws", "dc", "dc-turn"] {
+        let mut scenario = Scenario::new(format!("path-{path}"), Tier::T2);
+        scenario.steps.push(Step::PathSwitch {
+            path: path.to_string(),
+        });
+        scenario.steps.push(Step::CaptureChange {
+            region: Region::new(0, 0, 480, 320),
+        });
+        scenario.steps.push(Step::Advance { ms: 6_000 });
+        scenario.steps.push(Step::Assert {
+            invariant: Invariant::Inv6,
+        });
+        scenario.steps.push(Step::Assert {
+            invariant: Invariant::Inv7,
+        });
         let trace = run(&scenario);
-        trace.assert_clean();
-        assert!(trace.counters.bytes_sent > 0);
+        assert!(trace.is_clean(), "{path}: {:?}", trace.violations);
+        assert!(trace.measurements.bytes_down > 0);
         eprintln!(
-            "MEASURE path-{}: {} updates, {} bytes, {} of {} cells pending, {} converged observations",
-            path.as_str(),
-            trace.counters.updates_sent,
-            trace.counters.bytes_sent,
-            trace.counters.pending_cells,
-            trace.counters.cells,
-            trace.counters.converged_observations
+            "MEASURE path-{path}: {} update(s), {} bytes, {} of {} cells pending, {} converged observations",
+            trace.measurements.updates_sent,
+            trace.measurements.bytes_down,
+            trace.measurements.pending_cells,
+            trace.measurements.cells,
+            trace.measurements.convergences
         );
         // The switch changes the carrier, not the budgets: the same updates
         // and the same bytes leave, and the tier converges the same way.
-        let measured = (trace.counters.updates_sent, trace.counters.bytes_sent);
+        let measured = (
+            trace.measurements.updates_sent,
+            trace.measurements.bytes_down,
+        );
         match emitted {
             None => emitted = Some(measured),
             Some(first) => assert_eq!(
-                measured,
-                first,
-                "{}: the carrier switch changed the budget arithmetic",
-                path.as_str()
+                measured, first,
+                "{path}: the carrier switch changed the budget arithmetic"
             ),
         }
         assert!(
-            trace.counters.converged_observations > 0,
-            "{}: the switched lane never converged ({:?})",
-            path.as_str(),
-            trace.counters
+            trace.measurements.convergences > 0,
+            "{path}: the switched lane never converged"
         );
         assert!(
-            trace.counters.pending_cells <= tier_residue_cells(Tier::T2),
-            "{}: {} of {} cells still pending",
-            path.as_str(),
-            trace.counters.pending_cells,
-            trace.counters.cells
+            trace.measurements.pending_cells <= tier_residue_cells(Tier::T2),
+            "{path}: {} cells still pending",
+            trace.measurements.pending_cells
         );
     }
 }

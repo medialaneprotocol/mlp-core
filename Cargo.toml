@@ -13,19 +13,14 @@ publish = false
 
 [features]
 default = ["cli"]
-# Deterministic test harness: golden traces and the lossy-link simulator.
-# `serde_json` and `regex` are the harness's own dependencies: the simulator's
-# scenario bodies are JSON, and its loss model draws from a regex.
-testing = ["dep:regex", "dep:serde_json"]
-# The command-line tool: the JSON form it prints, and the corpus runner it
-# carries. It is on by default because the tool is part of what this crate
-# ships — `cargo install --path .` must give a person the protocol's tool —
-# and because a gate that does not build the tool does not gate it.
-cli = ["dep:serde_json", "testing"]
+# The command-line tool: the JSON form it prints. It is on by default because
+# the tool is part of what this crate ships — `cargo install --path .` must
+# give a person the protocol's tool — and because a gate that does not build
+# the tool does not gate it.
+cli = ["dep:serde_json"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-regex = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 
 [[bin]]
@@ -35,10 +30,18 @@ required-features = ["cli"]
 
 [dev-dependencies]
 serde_json = "1"
-# The integration suites drive the crate's own `testing` module, which is
-# feature-gated; the dev-dependency on the package itself turns the feature on
-# for tests, examples and benches only (never for a downstream build).
-mlp-core = { path = ".", features = ["testing"] }
+# The core's own suites drive the harness. The harness drives the core: the
+# cycle runs through a dev-dependency, which cargo allows. The patch makes
+# the harness's dependency on the core resolve to *this* core, so there is
+# exactly one copy of the machines in the graph and the types match.
+mlp-harness = { path = "../mlp-harness" }
+
+# The patch is what makes the cycle type-consistent: without it the harness
+# would link the *published* core while the core under test is this one, and
+# the two copies' types would not match. It applies only when this crate is
+# the workspace root, so a consumer of the published core is unaffected.
+[patch."https://github.com/medialaneprotocol/mlp-core"]
+mlp-core = { path = "." }
 
 [lints.rust]
 unsafe_code = "forbid"

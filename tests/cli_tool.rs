@@ -113,44 +113,6 @@ fn limits_lists_the_caps_the_timeouts_and_the_invariants() {
 }
 
 #[test]
-fn conformance_runs_the_published_corpus() {
-    let corpus = corpus_directory();
-    let Some(corpus) = corpus else {
-        // The corpus is a sibling repository. When it is not next to this one,
-        // the command must say so with its own exit status, not crash.
-        let outcome = run(&["conformance"]);
-        assert_eq!(outcome.code, 3, "{}", outcome.stderr);
-        assert!(outcome.stderr.contains("corpus"));
-        return;
-    };
-    let outcome = run(&["conformance", "--corpus", corpus.as_str(), "--json"]);
-    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
-    let document = json_of(&outcome);
-    assert_eq!(document["summary"]["failed"], 0);
-    assert!(document["summary"]["total"].as_u64().unwrap_or(0) > 0);
-    for scenario in document["scenarios"].as_array().expect("scenarios") {
-        assert_eq!(scenario["verdict"], "match", "{scenario}");
-    }
-}
-
-/// The corpus directory, when it is next to this repository.
-fn corpus_directory() -> Option<String> {
-    if let Ok(path) = std::env::var("MLP_CONFORMANCE_DIR")
-        && !path.is_empty()
-        && std::path::Path::new(&path).is_dir()
-    {
-        return Some(path);
-    }
-    let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .join("mlp-conformance");
-    if sibling.is_dir() {
-        return Some(sibling.to_string_lossy().to_string());
-    }
-    None
-}
-
-#[test]
 fn the_json_shape_is_stable() {
     // The shape a script may depend on: every command's JSON, exactly.
     let built = run(&[
@@ -354,7 +316,6 @@ fn the_help_documents_the_verbs_the_flags_and_the_exit_status() {
         "ack build",
         "ack inspect",
         "limits",
-        "conformance",
     ] {
         assert!(outcome.stdout.contains(verb), "{verb} is missing");
     }
@@ -370,7 +331,6 @@ fn the_help_documents_the_verbs_the_flags_and_the_exit_status() {
         &["ack", "build"][..],
         &["ack", "inspect"][..],
         &["limits"][..],
-        &["conformance"][..],
     ] {
         let mut arguments = command.to_vec();
         arguments.push("--help");

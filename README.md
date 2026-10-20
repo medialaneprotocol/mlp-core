@@ -72,22 +72,11 @@ fragment built
 | `ack build` | build the receiver's acknowledgement and print its bytes |
 | `ack inspect` | read an acknowledgement's bytes and print its fields and its window |
 | `limits` | print the protocol's hard limits: the caps, the timeouts, the invariants |
-| `conformance` | run the published conformance corpus against this build |
 
 Every command prints a table for a person and, with `--json`, a documented
 machine contract; the shapes are in [`docs/cli.md`](docs/cli.md). The exit
 status is a contract too: `0` succeeded, `1` the check failed, `2` the usage
 was wrong, `3` the input could not be read.
-
-```console
-$ mlp-core conformance --corpus ../mlp-conformance
-conformance corpus ../mlp-conformance
-
-scenario                           verdict  committed         produced          violations
-s01-t2-typing-echo                 match    b39895297c98bccb  b39895297c98bccb  0
-…
-16 of 16 scenario(s) match the corpus
-```
 
 Build it with `cargo build --release`; the binary is
 `target/release/mlp-core`.
@@ -106,8 +95,7 @@ Build it with `cargo build --release`; the binary is
 | `media::input` | the input path: sequencing, deadlines, the pressed set |
 | `media::lifecycle` | the lane's state vocabulary |
 | `media::error` | the rejection vocabulary |
-| `cli` | the command-line tool: the grammar, the JSON shapes, the corpus runner |
-| `testing` | the deterministic harness and the lossy-link simulator |
+| `cli` | the command-line tool: the grammar and the JSON shapes |
 
 ## Using it
 
@@ -141,14 +129,22 @@ cargo fmt --check
 ```
 
 The crate's only runtime dependencies are `serde` and, for the command-line
-tool, `serde_json`; the deterministic harness adds `regex`. There is no
-`unsafe` code: the lint table forbids `unsafe` outright.
+tool, `serde_json`. There is no `unsafe` code: the lint table forbids
+`unsafe` outright.
+
+The crate's own suites run against the protocol's verification layer,
+[`mlp-harness`](../mlp-harness), which drives this crate's machines over a
+modelled link and checks the protocol's invariants as the run proceeds. The
+harness depends on the core, and the core's suites depend on the harness:
+the cycle runs through a dev-dependency, which cargo allows, and the
+manifest patches the harness's dependency on the core back to this checkout
+so that the two crates share one copy of the machines.
 
 ## Status
 
 In development. One moving version, `v0.1.0`, naming the current commit. The
-wire format is frozen by the [specification](../mlp); the tool, the corpus
-and the estimator are still moving.
+wire format is frozen by the [specification](../mlp); the tool and the
+estimator are still moving.
 
 ## License
 
@@ -166,4 +162,5 @@ implementation may interoperate with this one.
 | [`mlp`](https://github.com/medialaneprotocol/mlp) | the normative specification |
 | [`mlp-ts`](https://github.com/medialaneprotocol/mlp-ts) | the browser implementation |
 | [`mlp-proto`](https://github.com/medialaneprotocol/mlp-proto) | the wire schema |
+| [`mlp-harness`](https://github.com/medialaneprotocol/mlp-harness) | the verification layer: the link model, the driver, the invariants |
 | [`mlp-conformance`](https://github.com/medialaneprotocol/mlp-conformance) | the conformance corpus and its gate |

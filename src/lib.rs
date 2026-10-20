@@ -49,15 +49,14 @@
 //! | [`input`] | the input path: sequencing, deadlines, and the pressed set |
 //! | [`lifecycle`] | the lane's state vocabulary |
 //! | [`error`] | the rejection vocabulary |
-//! | [`testing`] | the deterministic harness and the lossy-link simulator |
 //!
 //! # The command-line tool
 //!
 //! The crate also ships `mlp-core`, the protocol's command-line tool: it
 //! builds and reads fragments, assembles objects, builds and reads the
-//! receiver's acknowledgement, prints the protocol's hard limits, and runs the
-//! published conformance corpus against a build. It lives behind the `cli`
-//! feature, so the library's default dependency closure stays what it is.
+//! receiver's acknowledgement, and prints the protocol's hard limits. It
+//! lives behind the `cli` feature, so the library's default dependency
+//! closure stays what it is.
 //!
 //! ```
 //! # #[cfg(feature = "cli")]
@@ -96,10 +95,6 @@ pub mod action;
 pub mod cli;
 pub mod media;
 pub mod state_machine;
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
 
 pub use action::{Action, ConnectionEvent, Receive, Transmit};
 pub use state_machine::{SessionPhase, StateMachine};
-#[cfg(any(test, feature = "testing"))]
-pub use testing::{GoldenTrace, TestHarness, test_epoch};

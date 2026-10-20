@@ -2,8 +2,7 @@
 //!
 //! The tool is the protocol's front door: it builds and reads the bytes the
 //! protocol defines, assembles objects, builds and reads the receiver's
-//! acknowledgement, prints the protocol's hard limits, and runs the published
-//! conformance corpus against this build.
+//! acknowledgement, and prints the protocol's hard limits.
 //!
 //! Two output forms, and they are two different contracts:
 //!
@@ -16,7 +15,7 @@
 //! | status | meaning |
 //! |---|---|
 //! | `0` | the command succeeded |
-//! | `1` | the check failed — a corpus verdict, or a measurement past its budget |
+//! | `1` | the check failed — a measurement past its budget |
 //! | `2` | the usage was wrong — an unknown verb, a missing or unknown flag |
 //! | `3` | the input could not be read — bad hex, a truncated fragment, a body that does not decode |
 //!
@@ -24,7 +23,6 @@
 //! reason.
 
 pub mod ack;
-pub mod conformance;
 pub mod fragment;
 pub mod limits;
 pub mod object;
@@ -383,24 +381,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         flags: &[JSON_FLAG],
         example: "mlp-core limits --json",
     },
-    CommandSpec {
-        path: &["conformance"],
-        summary: "Run the published conformance corpus against this build and report the verdicts.",
-        flags: &[
-            FlagSpec {
-                name: "corpus",
-                takes_value: true,
-                help: "the corpus repository's directory",
-            },
-            FlagSpec {
-                name: "scenario",
-                takes_value: true,
-                help: "run only the scenario with this id; repeatable",
-            },
-            JSON_FLAG,
-        ],
-        example: "mlp-core conformance --corpus ../mlp-conformance",
-    },
 ];
 
 /// The name the tool reports in `--version`.
@@ -469,7 +449,6 @@ fn dispatch(args: &[String]) -> Result<Outcome, CliError> {
         ["ack", "build"] => ack::build(&options, json)?,
         ["ack", "inspect"] => ack::inspect(&options, json)?,
         ["limits"] => limits::limits(&options, json)?,
-        ["conformance"] => conformance::conformance(&options, json)?,
         _ => {
             return Err(CliError::Usage(format!(
                 "unknown command `{}`",
@@ -498,7 +477,6 @@ Commands:
   ack build          Build the receiver\'s acknowledgement and print its bytes.
   ack inspect        Read an acknowledgement\'s bytes and print its fields and its window.
   limits             Print the protocol\'s hard limits: the caps, the timeouts, the invariants.
-  conformance        Run the published conformance corpus against this build.
 
 Global flags:
   --json             Print the machine-readable JSON form instead of the table.
@@ -507,7 +485,7 @@ Global flags:
 
 Exit status:
   0  the command succeeded
-  1  the check failed (a corpus verdict, a measurement past its budget)
+  1  the check failed (a measurement past its budget)
   2  the usage was wrong
   3  the input could not be read
 
