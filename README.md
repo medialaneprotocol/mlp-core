@@ -1,6 +1,7 @@
 # mlp-core
 
-The reference implementation of the **Media Lane Protocol (MLP)** core, in Rust.
+The reference implementation of the **Media Lane Protocol (MLP)** core, in Rust,
+and the protocol's command-line tool.
 
 MLP is a transport for real-time interactive media over links that are slow,
 lossy, or both. This crate is where the protocol's bytes are defined, encoded,
@@ -42,6 +43,55 @@ learning anything about it.
 
 A driver implements both and owns the carrier.
 
+## The command-line tool
+
+The crate ships `mlp-core`, the protocol's tool: it is how a person and a
+script use the protocol without writing Rust.
+
+```console
+$ mlp-core fragment build --class media --priority 6 --flags fin \
+      --object-id 7 --tlv UPDATE_ID=0700000000000000 --body 00010203
+fragment built
+  bytes            4d4c5000010201060700000000000100040000000a000108070000000000000000010203
+  version          1
+  class            media
+  flags            fin
+  priority         6
+  object id        7
+  fragment         0 of 1
+  header extension 10 bytes
+  body             4 bytes
+  body sha256      054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8
+```
+
+| command | what it does |
+|---|---|
+| `fragment build` | build one fragment from its fields and print its bytes |
+| `fragment inspect` | read a fragment's bytes and print its header, its TLVs and its body |
+| `object assemble` | assemble fragments into one object and report what the assembler decided |
+| `ack build` | build the receiver's acknowledgement and print its bytes |
+| `ack inspect` | read an acknowledgement's bytes and print its fields and its window |
+| `limits` | print the protocol's hard limits: the caps, the timeouts, the invariants |
+| `conformance` | run the published conformance corpus against this build |
+
+Every command prints a table for a person and, with `--json`, a documented
+machine contract; the shapes are in [`docs/cli.md`](docs/cli.md). The exit
+status is a contract too: `0` succeeded, `1` the check failed, `2` the usage
+was wrong, `3` the input could not be read.
+
+```console
+$ mlp-core conformance --corpus ../mlp-conformance
+conformance corpus ../mlp-conformance
+
+scenario                           verdict  committed         produced          violations
+s01-t2-typing-echo                 match    b39895297c98bccb  b39895297c98bccb  0
+…
+16 of 16 scenario(s) match the corpus
+```
+
+Build it with `cargo build --release`; the binary is
+`target/release/mlp-core`.
+
 ## Layout
 
 | Module | Responsibility |
@@ -56,6 +106,7 @@ A driver implements both and owns the carrier.
 | `media::input` | the input path: sequencing, deadlines, the pressed set |
 | `media::lifecycle` | the lane's state vocabulary |
 | `media::error` | the rejection vocabulary |
+| `cli` | the command-line tool: the grammar, the JSON shapes, the corpus runner |
 | `testing` | the deterministic harness and the lossy-link simulator |
 
 ## Using it
@@ -85,11 +136,19 @@ assert_eq!(fragment.header.class, FragmentClass::Control);
 ```bash
 cargo build
 cargo test
-cargo test --features testing   # the deterministic harness and the simulator
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-The crate has no runtime dependency and no `unsafe` code; the lint table
-forbids `unsafe` outright.
+The crate's only runtime dependencies are `serde` and, for the command-line
+tool, `serde_json`; the deterministic harness adds `regex`. There is no
+`unsafe` code: the lint table forbids `unsafe` outright.
+
+## Status
+
+In development. One moving version, `v0.1.0`, naming the current commit. The
+wire format is frozen by the [specification](../mlp); the tool, the corpus
+and the estimator are still moving.
 
 ## License
 
@@ -99,3 +158,12 @@ requires a separate license. See [LICENSE](LICENSE).
 The [specification](../mlp) and the
 [conformance suite](../mlp-conformance) are under Apache-2.0, so any
 implementation may interoperate with this one.
+
+## Sibling repositories
+
+| repository | what it holds |
+|---|---|
+| [`mlp`](https://github.com/medialaneprotocol/mlp) | the normative specification |
+| [`mlp-ts`](https://github.com/medialaneprotocol/mlp-ts) | the browser implementation |
+| [`mlp-proto`](https://github.com/medialaneprotocol/mlp-proto) | the wire schema |
+| [`mlp-conformance`](https://github.com/medialaneprotocol/mlp-conformance) | the conformance corpus and its gate |
