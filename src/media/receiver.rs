@@ -117,7 +117,7 @@ pub struct ReceiverStats {
     /// Feedback reports built.
     pub feedback_reports: u64,
     /// Updates the driver reported as applied.
-    pub applied_frames: u64,
+    pub applied_updates: u64,
 }
 
 /// The receiver machine.
@@ -483,7 +483,7 @@ impl MediaReceiverMachine {
         } else if self.highest_applied - update_id < 64 {
             self.bitmap |= 1 << (self.highest_applied - update_id);
         }
-        self.stats.applied_frames += 1;
+        self.stats.applied_updates += 1;
     }
 
     /// Note that the driver applied a chunk: the idempotence record for `DUP`
@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_frames_build_a_selective_ack() {
+    fn applied_updates_build_a_selective_ack() {
         let now = Instant::now();
         let mut receiver = receiver(Carrier::Ws);
         receiver.note_applied(1);
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn ack_window_slides_beyond_64_frames() {
+    fn ack_window_slides_beyond_64_updates() {
         let now = Instant::now();
         let mut receiver = receiver(Carrier::Ws);
         for update in 1..=100u64 {
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn media_without_frame_metadata_is_dropped() {
+    fn media_without_update_metadata_is_dropped() {
         let now = Instant::now();
         let mut receiver = receiver(Carrier::Ws);
         let fragment = Fragment::new(

@@ -42,7 +42,7 @@ impl PriorityBand {
     }
 }
 
-/// The kind of update a decision produces (`mlp_frames_total{kind}`).
+/// The kind of update a decision produces (`mlp_updates_total{kind}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateKind {
     /// A chained delta update.
@@ -77,14 +77,14 @@ pub struct UpdateBudget {
     pub bytes: u32,
     /// `max_object_bytes`: the largest single object.
     pub max_object_bytes: u32,
-    /// `max_chunks_per_frame` for the carrier and current loss.
-    pub max_chunks: u16,
+    /// `max_parts_per_update` for the carrier and current loss.
+    pub max_parts: u16,
     /// The update interval implied by `target_fps`.
     pub update_interval_ms: u32,
     /// The codec's chunk wire ceiling (491 520 B) — a ceiling, not a budget.
-    pub max_chunk_wire_bytes: u32,
+    pub max_part_wire_bytes: u32,
     /// The carrier's per-chunk cap.
-    pub path_chunk_cap: u32,
+    pub path_part_cap: u32,
 }
 
 impl Default for UpdateBudget {
@@ -92,27 +92,27 @@ impl Default for UpdateBudget {
         Self {
             bytes: 4_096,
             max_object_bytes: 8_192,
-            max_chunks: 8,
+            max_parts: 8,
             update_interval_ms: 33,
-            max_chunk_wire_bytes: 491_520,
-            path_chunk_cap: 65_536,
+            max_part_wire_bytes: 491_520,
+            path_part_cap: 65_536,
         }
     }
 }
 
 impl UpdateBudget {
-    /// How many chunks a payload of `payload_bytes` needs (MLP spec §8).
+    /// How many parts a payload of `payload_bytes` needs (MLP spec §8).
     ///
     /// `None` when the update cannot be carried at all: the caller must
     /// decompose it into more updates rather than emit an oversized object.
     pub fn part_count(&self, payload_bytes: u32) -> Option<u16> {
         let per_chunk = self
-            .max_chunk_wire_bytes
+            .max_part_wire_bytes
             .min(self.bytes)
-            .min(self.path_chunk_cap)
+            .min(self.path_part_cap)
             .max(1);
         let count = payload_bytes.div_ceil(per_chunk);
-        if count > u32::from(self.max_chunks) {
+        if count > u32::from(self.max_parts) {
             return None;
         }
         Some(count.max(1) as u16)
@@ -120,10 +120,10 @@ impl UpdateBudget {
 
     /// The largest payload this update may carry.
     pub fn payload_ceiling(&self) -> u32 {
-        self.max_chunk_wire_bytes
+        self.max_part_wire_bytes
             .min(self.bytes)
-            .min(self.path_chunk_cap)
-            .saturating_mul(u32::from(self.max_chunks.max(1)))
+            .min(self.path_part_cap)
+            .saturating_mul(u32::from(self.max_parts.max(1)))
     }
 }
 
@@ -548,12 +548,12 @@ pub struct SchedulerConfig {
     pub pulse_window_floor_ms: u64,
     /// `input_pulse_fps = min(30, max(4, target_fps × 2))` multiplier.
     pub pulse_fps_multiplier: f64,
-    /// `max_chunks_per_frame` on a stream carrier.
-    pub max_chunks_stream: u16,
-    /// `max_chunks_per_frame` on a datagram carrier without heavy loss.
-    pub max_chunks_datagram: u16,
+    /// `max_parts_per_update` on a stream carrier.
+    pub max_parts_stream: u16,
+    /// `max_parts_per_update` on a datagram carrier without heavy loss.
+    pub max_parts_datagram: u16,
     /// Loss ratio above which a datagram update must be a single chunk.
-    pub single_chunk_loss_ratio: f64,
+    pub single_part_loss_ratio: f64,
 }
 
 impl Default for SchedulerConfig {
@@ -564,9 +564,9 @@ impl Default for SchedulerConfig {
             idle_interval_ceiling_ms: 3_000,
             pulse_window_floor_ms: 300,
             pulse_fps_multiplier: 2.0,
-            max_chunks_stream: 8,
-            max_chunks_datagram: 4,
-            single_chunk_loss_ratio: 0.05,
+            max_parts_stream: 8,
+            max_parts_datagram: 4,
+            single_part_loss_ratio: 0.05,
         }
     }
 }
@@ -586,7 +586,7 @@ impl SchedulerConfig {
 /// Smallest gap between updates for a receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateTimer {
-    last_frame_ms: Option<u64>,
+    last_update_ms: Option<u64>,
     pulse_until_ms: Option<u64>,
 }
 
@@ -594,14 +594,14 @@ impl UpdateTimer {
     /// A timer with no updates emitted yet.
     pub fn new() -> Self {
         Self {
-            last_frame_ms: None,
+            last_update_ms: None,
             pulse_until_ms: None,
         }
     }
 
     /// Record that a update was emitted.
-    pub fn on_frame(&mut self, now_ms: u64) {
-        self.last_frame_ms = Some(now_ms);
+    pub fn on_update(&mut self, now_ms: u64) {
+        self.last_update_ms = Some(now_ms);
     }
 
     /// Open an input-pulse window.
@@ -626,8 +626,8 @@ impl UpdateTimer {
     }
 
     /// The time of the last update.
-    pub fn last_frame_ms(&self) -> Option<u64> {
-        self.last_frame_ms
+    pub fn last_update_ms(&self) -> Option<u64> {
+        self.last_update_ms
     }
 
     /// Whether a update is due at `target_fps`.
@@ -636,7 +636,7 @@ impl UpdateTimer {
             return true;
         }
         let interval = (1_000.0 / target_fps.max(0.5)).round() as u64;
-        match self.last_frame_ms {
+        match self.last_update_ms {
             Some(last) => now_ms.saturating_sub(last) >= interval.max(1),
             None => true,
         }
@@ -761,16 +761,16 @@ impl Scheduler {
         budget_bytes.min(quarter_second.max(1_024) as u32)
     }
 
-    /// `max_chunks_per_frame` for a carrier and the current loss (MLP spec annex D, D-19).
+    /// `max_parts_per_update` for a carrier and the current loss (MLP spec annex D, D-19).
     pub fn max_chunks_for(&self, datagram: bool, loss_ratio: f64) -> u16 {
         if datagram {
-            if loss_ratio > self.config.single_chunk_loss_ratio {
+            if loss_ratio > self.config.single_part_loss_ratio {
                 1
             } else {
-                self.config.max_chunks_datagram
+                self.config.max_parts_datagram
             }
         } else {
-            self.config.max_chunks_stream
+            self.config.max_parts_stream
         }
     }
 
@@ -823,8 +823,8 @@ impl Scheduler {
         // A running plan owns the update.
         if let Some(band) = self.plans.next_band(request.budget.bytes, cell_bytes) {
             let estimated = (band.cells.len() as u32).saturating_mul(cell_bytes);
-            self.on_frame_kind(UpdateKind::Anchor);
-            self.timer.on_frame(now_ms);
+            self.on_update_kind(UpdateKind::Anchor);
+            self.timer.on_update(now_ms);
             return ScheduleDecision {
                 cells: band.cells,
                 band: PriorityBand::P0,
@@ -918,8 +918,8 @@ impl Scheduler {
         if !cells.is_empty() {
             self.focus = None;
         }
-        self.timer.on_frame(now_ms);
-        self.on_frame_kind(kind);
+        self.timer.on_update(now_ms);
+        self.on_update_kind(kind);
         ScheduleDecision {
             estimated_bytes: (cells.len() as u32).saturating_mul(cell_bytes),
             cells,
@@ -931,7 +931,7 @@ impl Scheduler {
         }
     }
 
-    fn on_frame_kind(&mut self, kind: UpdateKind) {
+    fn on_update_kind(&mut self, kind: UpdateKind) {
         let slot = match kind {
             UpdateKind::Delta => 0,
             UpdateKind::Anchor => 1,
@@ -997,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_truncates_the_frame_and_counts_deferred() {
+    fn budget_truncates_the_update_and_counts_deferred() {
         let scheduler = scheduler();
         let _ = scheduler.idle_interval_ms_for(50.0);
         let grid = CellGrid::with_cell_size(320, 320, 32);
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_request_marks_the_frame() {
+    fn anchor_request_marks_the_update() {
         let mut scheduler = scheduler();
         let grid = CellGrid::with_cell_size(256, 256, 32);
         let fresh = [0, 1];
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_decision_is_an_idle_frame() {
+    fn an_empty_decision_is_an_idle_update() {
         let mut scheduler = scheduler();
         let grid = CellGrid::with_cell_size(256, 256, 32);
         let decision =
@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_frames_win_over_fresh_work() {
+    fn plan_updates_win_over_fresh_work() {
         let mut scheduler = scheduler();
         let grid = CellGrid::with_cell_size(256, 256, 32);
         let plan_id = scheduler
@@ -1282,9 +1282,9 @@ mod tests {
     fn chunk_count_never_exceeds_max_chunks() {
         let budget = UpdateBudget {
             bytes: 65_536,
-            max_chunks: 4,
-            max_chunk_wire_bytes: 65_536,
-            path_chunk_cap: 65_536,
+            max_parts: 4,
+            max_part_wire_bytes: 65_536,
+            path_part_cap: 65_536,
             ..UpdateBudget::default()
         };
         assert_eq!(budget.part_count(0), Some(1));
@@ -1299,7 +1299,7 @@ mod tests {
     fn update_timer_gates_the_update_rate() {
         let mut timer = UpdateTimer::new();
         assert!(timer.due(0, 10.0), "no update yet");
-        timer.on_frame(0);
+        timer.on_update(0);
         assert!(!timer.due(50, 10.0));
         assert!(timer.due(100, 10.0));
     }

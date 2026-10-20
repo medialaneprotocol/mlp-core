@@ -31,11 +31,11 @@ fn tier_scenario(tier: Tier, quiet_ms: u64) -> Scenario {
         .step(Step::Assert(Invariant::Inv7))
 }
 
-/// INV-6: no object exceeds the estimator's cap, and no frame exceeds
-/// `max_chunks × fragment_cap`. The simulator enforces this while running;
+/// INV-6: no object exceeds the estimator's cap, and no update exceeds
+/// `max_parts × fragment_cap`. The simulator enforces this while running;
 /// this test asserts the trace's shape too.
 #[test]
-fn inv6_object_and_frame_caps_hold_on_every_tier() {
+fn inv6_object_and_update_caps_hold_on_every_tier() {
     for tier in Tier::all() {
         let trace = run(&tier_scenario(tier, 8_000));
         trace.assert_clean();
@@ -44,22 +44,22 @@ fn inv6_object_and_frame_caps_hold_on_every_tier() {
             "{}: nothing was sent",
             tier.as_str()
         );
-        // Every frame the trace records fits the design's object rule: a frame
-        // is at most `max_chunks × path cap` and each chunk is one object.
+        // Every update the trace records fits the design's object rule: a update
+        // is at most `max_parts × path cap` and each chunk is one object.
         let budget = UpdateBudget {
             bytes: 1_048_576,
-            max_chunks: 8,
-            max_chunk_wire_bytes: 65_536,
-            path_chunk_cap: 65_536,
+            max_parts: 8,
+            max_part_wire_bytes: 65_536,
+            path_part_cap: 65_536,
             ..UpdateBudget::default()
         };
-        for frame in &trace.updates {
+        for update in &trace.updates {
             assert!(
-                u32::from(budget.payload_ceiling()) >= frame.bytes,
-                "{}: frame {} is {} bytes",
+                u32::from(budget.payload_ceiling()) >= update.bytes,
+                "{}: update {} is {} bytes",
                 tier.as_str(),
-                frame.update_id,
-                frame.bytes
+                update.update_id,
+                update.bytes
             );
         }
     }
@@ -131,7 +131,7 @@ fn echo_p95_matches_the_tier_promise() {
         };
         let budget = (2.0 * LinkProfile::tier(tier).rtt_ms + 250.0).round() as u64;
         // One repair delay and the simulator's tick are the honest allowance:
-        // the design repairs a lost echo-critical frame instead of
+        // the design repairs a lost echo-critical update instead of
         // retransmitting it (D-6).
         let allowance = budget + 3_000 + 10;
         assert!(
@@ -156,7 +156,7 @@ fn the_cold_start_is_bounded_and_converges() {
         trace.assert_clean();
         assert!(
             trace.counters.updates_sent > 0,
-            "{}: the cold start never sent a frame",
+            "{}: the cold start never sent a update",
             tier.as_str()
         );
         assert!(
@@ -167,7 +167,7 @@ fn the_cold_start_is_bounded_and_converges() {
     }
 }
 
-/// The timeout framework's arithmetic (design §13):
+/// The timeout updatework's arithmetic (design §13):
 /// `session_idle ≥ 2 × outage + 4 × RTT`, `park_ttl ≥ outage + ladder`,
 /// `heartbeat × 4 ≤ session_idle`, `repair_delay ≥ RTT`.
 #[test]

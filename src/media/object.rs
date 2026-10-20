@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn media_without_frame_id_is_body_invalid() {
+    fn media_without_update_id_is_body_invalid() {
         let (mut assembler, now) = assemble_three();
         let outcome = assembler.accept(fragment(43, 0, 1, true, vec![9], HeaderExt::new()), 0, now);
         match outcome {

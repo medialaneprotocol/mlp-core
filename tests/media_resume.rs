@@ -52,7 +52,7 @@ fn held() -> HeldViewerState {
     HeldViewerState {
         epoch: 3,
         next_update_id: 41,
-        last_sent_frame_id: 40,
+        last_sent_update_id: 40,
         pending_cells: 0,
         pressed: vec![InputToken::Key(16), InputToken::Button(1)],
         input_seq_next: 90,
@@ -142,7 +142,7 @@ fn a_clean_resume_rebases_and_keeps_the_chain() {
     let outcome = decide_resume(&request(3), 1_100, &mut state, true, false);
     assert!(outcome.accepted);
     assert_eq!(outcome.reason, ResumeRejectReason::Ok);
-    assert_eq!(outcome.next_update_id, 41, "no frame id restart");
+    assert_eq!(outcome.next_update_id, 41, "no update id restart");
     assert_eq!(outcome.pending_cells, 0);
     assert!(!outcome.anchor_plan_started);
     assert_eq!(
@@ -153,7 +153,7 @@ fn a_clean_resume_rebases_and_keeps_the_chain() {
 }
 
 #[test]
-fn pending_blocks_start_a_plan_without_a_reset_frame() {
+fn pending_blocks_start_a_plan_without_a_reset_update() {
     let mut state = held();
     state.pending_cells = 37;
     let outcome = decide_resume(&request(3), 1_100, &mut state, true, false);

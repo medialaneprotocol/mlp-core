@@ -286,7 +286,7 @@ pub struct MediaAnchorPlan {
     /// Plan identifier, monotone per receiver.
     pub plan_id: u32,
     /// Estimated updates to finish the plan.
-    pub total_frames_estimate: u32,
+    pub total_updates_estimate: u32,
     /// Cells in the plan.
     pub total_cells: u32,
     /// Plan priority (MLP spec §8).
@@ -480,7 +480,7 @@ impl MediaAck {
     }
 
     /// The update ids this ack covers, highest first.
-    pub fn applied_frames(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn applied_updates(&self) -> impl Iterator<Item = u64> + '_ {
         let highest = self.highest_applied_update_id;
         (0..64u32)
             .filter(move |i| self.ack_bitmap & (1u64 << i) != 0)
@@ -711,7 +711,7 @@ mod tests {
         assert!(ack.is_applied(8));
         assert!(ack.is_applied(6));
         assert!(!ack.is_applied(11));
-        assert_eq!(ack.applied_frames().collect::<Vec<_>>(), vec![10, 8, 6]);
+        assert_eq!(ack.applied_updates().collect::<Vec<_>>(), vec![10, 8, 6]);
         assert_eq!(ack.validate(), Ok(()));
     }
 
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn ack_window_is_64_frames() {
+    fn ack_window_is_64_updates() {
         let ack = MediaAck {
             highest_applied_update_id: 100,
             ack_bitmap: u64::MAX,

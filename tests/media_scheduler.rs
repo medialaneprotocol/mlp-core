@@ -1,4 +1,4 @@
-//! Scheduling, frame timing and anchor plans (design §7.3, §7.6, D-19).
+//! Scheduling, update timing and anchor plans (design §7.3, §7.6, D-19).
 //!
 //! Everything the scheduler decides must be a function of injected inputs:
 //! these tests pin the priority bands, the budget truncation, the input pulse,
@@ -72,7 +72,7 @@ fn blocks_are_ordered_p0_p1_p2_p3() {
 }
 
 #[test]
-fn the_frame_budget_truncates_and_counts_the_deferred_work() {
+fn the_update_budget_truncates_and_counts_the_deferred_work() {
     let grid = grid();
     let config = SchedulerConfig {
         cell_bytes: 2_048,
@@ -110,7 +110,7 @@ fn the_default_block_estimate_always_lets_the_floor_budget_make_progress() {
 }
 
 #[test]
-fn an_input_pulse_raises_the_frame_rate_and_has_its_own_budget() {
+fn an_input_pulse_raises_the_update_rate_and_has_its_own_budget() {
     let mut scheduler = Scheduler::new(SchedulerConfig::default(), PlanConfig::default());
     let grid = grid();
     let now = 1_000u64;
@@ -129,26 +129,26 @@ fn an_input_pulse_raises_the_frame_rate_and_has_its_own_budget() {
     let budget = scheduler.pulse_budget_bytes(4_096, 32_000);
     assert_eq!(budget, 1_024, "a quarter second of the pace, floored");
     let capped = scheduler.pulse_budget_bytes(4_096, 1_000_000);
-    assert_eq!(capped, 4_096, "never above the frame budget");
+    assert_eq!(capped, 4_096, "never above the update budget");
     let _ = grid;
 }
 
 #[test]
-fn the_frame_timer_gates_the_rate_and_the_pulse_bypasses_it() {
+fn the_update_timer_gates_the_rate_and_the_pulse_bypasses_it() {
     let mut timer = UpdateTimer::new();
     assert!(timer.due(0, 10.0));
-    timer.on_frame(0);
+    timer.on_update(0);
     assert!(!timer.due(50, 10.0), "10 fps = 100 ms");
     assert!(timer.due(100, 10.0));
     timer.pulse(100, 300);
     assert!(timer.due(110, 10.0), "a pulse bypasses the fps gate");
     timer.expire_pulse(500);
     assert!(!timer.pulse_active(500));
-    assert_eq!(timer.last_frame_ms(), Some(0));
+    assert_eq!(timer.last_update_ms(), Some(0));
 }
 
 #[test]
-fn idle_frames_are_clamped_between_one_and_three_seconds() {
+fn idle_updates_are_clamped_between_one_and_three_seconds() {
     assert_eq!(IDLE_FRAME_INTERVAL_FLOOR_MS, 1_000);
     assert_eq!(IDLE_FRAME_INTERVAL_CEILING_MS, 3_000);
     assert_eq!(UpdateTimer::idle_interval_ms(10.0), 1_000);
@@ -177,9 +177,9 @@ fn chunk_limits_follow_the_carrier_and_the_loss_ratio() {
     );
     let budget = UpdateBudget {
         bytes: 65_536,
-        max_chunks: 4,
-        max_chunk_wire_bytes: 65_536,
-        path_chunk_cap: 65_536,
+        max_parts: 4,
+        max_part_wire_bytes: 65_536,
+        path_part_cap: 65_536,
         ..UpdateBudget::default()
     };
     assert_eq!(budget.part_count(1), Some(1));
@@ -189,7 +189,7 @@ fn chunk_limits_follow_the_carrier_and_the_loss_ratio() {
     assert_eq!(
         budget.part_count(262_145),
         None,
-        "the frame must be decomposed, never oversized (§7.3.4)"
+        "the update must be decomposed, never oversized (§7.3.4)"
     );
     assert_eq!(budget.payload_ceiling(), 262_144);
 }
@@ -301,7 +301,7 @@ fn plan_bands_win_over_fresh_work() {
 }
 
 #[test]
-fn an_empty_decision_is_an_idle_frame_and_counts_as_one() {
+fn an_empty_decision_is_an_idle_update_and_counts_as_one() {
     let mut scheduler = Scheduler::new(SchedulerConfig::default(), PlanConfig::default());
     let decision = scheduler.schedule(request(&[], &[], &[], roomy()), &grid(), 0);
     assert!(decision.is_empty());
@@ -311,7 +311,7 @@ fn an_empty_decision_is_an_idle_frame_and_counts_as_one() {
 }
 
 #[test]
-fn frame_kinds_map_to_the_documented_labels() {
+fn update_kinds_map_to_the_documented_labels() {
     assert_eq!(UpdateKind::Delta.as_str(), "delta");
     assert_eq!(UpdateKind::Anchor.as_str(), "anchor");
     assert_eq!(UpdateKind::Pulse.as_str(), "pulse");
@@ -324,7 +324,7 @@ fn frame_kinds_map_to_the_documented_labels() {
 }
 
 #[test]
-fn the_focus_rect_is_consumed_by_the_frame_that_carried_it() {
+fn the_focus_rect_is_consumed_by_the_update_that_carried_it() {
     let mut scheduler = Scheduler::new(SchedulerConfig::default(), PlanConfig::default());
     let grid = grid();
     scheduler.mark_focus(CellRect::new(0, 0, 128, 128));
@@ -347,21 +347,21 @@ fn every_policy_knob_comes_from_configuration() {
     let grid = grid();
     let strict = SchedulerConfig {
         cell_bytes: 8_192,
-        max_chunks_datagram: 2,
-        single_chunk_loss_ratio: 0.01,
+        max_parts_datagram: 2,
+        single_part_loss_ratio: 0.01,
         idle_interval_floor_ms: 2_000,
         ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::new(strict, PlanConfig::default());
     let budget = UpdateBudget {
         bytes: 16_384,
-        max_chunks: 10,
+        max_parts: 10,
         ..UpdateBudget::default()
     };
     let fresh: Vec<u32> = (0..10).collect();
     let decision = scheduler.schedule(request(&[], &fresh, &[], budget), &grid, 0);
-    // The configured estimate governs both the block count and the frame's
-    // estimated size, and the frame never exceeds the budget.
+    // The configured estimate governs both the block count and the update's
+    // estimated size, and the update never exceeds the budget.
     assert!(!decision.cells.is_empty());
     assert_eq!(
         decision.estimated_bytes,
@@ -382,11 +382,11 @@ fn every_policy_knob_comes_from_configuration() {
     assert_eq!(
         scheduler.max_chunks_for(true, 0.02),
         1,
-        "above the configured loss threshold a datagram frame is one chunk"
+        "above the configured loss threshold a datagram update is one chunk"
     );
     // The floor is a config knob, not a literal: 2 000 ms means the first
     // second of a fresh scheduler is still not idle-due.
-    assert!(scheduler.idle_due(0, 50.0), "no idle frame yet");
+    assert!(scheduler.idle_due(0, 50.0), "no idle update yet");
     scheduler.on_idle(0);
     assert!(!scheduler.idle_due(1_000, 50.0));
     assert!(scheduler.idle_due(2_000, 50.0));

@@ -392,7 +392,7 @@ fn control_bodies_validate_their_limits() {
 
     let plan = MediaAnchorPlan {
         plan_id: 1,
-        total_frames_estimate: 3,
+        total_updates_estimate: 3,
         total_cells: 0,
         priority: 6,
     };
@@ -433,7 +433,7 @@ fn cursor_objects_are_never_fragmented_and_stay_small() {
 
 #[test]
 fn ack_validation_matches_the_design() {
-    // Bit i = frame (highest - i); frame ids start at 1.
+    // Bit i = update (highest - i); update ids start at 1.
     let good = MediaAck {
         highest_applied_update_id: 10,
         ack_bitmap: 0b1_0101,
@@ -515,7 +515,7 @@ fn error_codes_are_frozen() {
 }
 
 #[test]
-fn frame_meta_round_trips_and_checks_consistency() {
+fn update_meta_round_trips_and_checks_consistency() {
     let meta = UpdateMeta {
         update_id: 100,
         update_base: 99,
@@ -537,7 +537,9 @@ fn frame_meta_round_trips_and_checks_consistency() {
     assert_eq!(UpdateMeta::from_ext(&ext), Some(meta));
     // UPDATE_ID is the one required field.
     assert_eq!(UpdateMeta::from_ext(&HeaderExt::new()), None);
-    let mut without_frame = HeaderExt::new();
-    without_frame.push_u64(tlv::SEND_EPOCH_MS, 5).expect("fits");
-    assert_eq!(UpdateMeta::from_ext(&without_frame), None);
+    let mut without_update = HeaderExt::new();
+    without_update
+        .push_u64(tlv::SEND_EPOCH_MS, 5)
+        .expect("fits");
+    assert_eq!(UpdateMeta::from_ext(&without_update), None);
 }

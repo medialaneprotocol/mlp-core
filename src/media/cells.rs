@@ -262,14 +262,14 @@ pub struct CellCounters {
     /// Cells marked stale by a update-epoch change.
     pub epoch_resets: u64,
     /// Updates the accounting accepted from acks.
-    pub applied_frames: u64,
+    pub applied_updates: u64,
 }
 
 /// The result of processing one ack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AckOutcome {
     /// Applied updates named by the bitmap.
-    pub applied_frames: u32,
+    pub applied_updates: u32,
     /// Cells removed from pending.
     pub cleared_cells: u32,
     /// Whether the ack named a update outside the ring.
@@ -350,7 +350,7 @@ pub struct CellAccounting {
     ring: VecDeque<UpdateRecord>,
     epoch: u32,
     last_applied_update_id: u64,
-    last_sent_frame_id: u64,
+    last_sent_update_id: u64,
     last_ack_at_ms: Option<u64>,
     counters: CellCounters,
     stuck_cells: Vec<u32>,
@@ -367,7 +367,7 @@ impl CellAccounting {
             ring: VecDeque::new(),
             epoch: 0,
             last_applied_update_id: 0,
-            last_sent_frame_id: 0,
+            last_sent_update_id: 0,
             last_ack_at_ms: None,
             counters: CellCounters::default(),
             stuck_cells: Vec::new(),
@@ -392,7 +392,7 @@ impl CellAccounting {
         self.emitted_any = vec![false; grid.cells() as usize];
         self.ring.clear();
         self.last_applied_update_id = 0;
-        self.last_sent_frame_id = 0;
+        self.last_sent_update_id = 0;
         self.stuck_cells.clear();
         self.counters.epoch_resets += 1;
         previous
@@ -435,7 +435,7 @@ impl CellAccounting {
     }
 
     /// Update the update interval that drives the repair delay and ring.
-    pub fn set_frame_interval_ms(&mut self, interval_ms: u64) {
+    pub fn set_update_interval_ms(&mut self, interval_ms: u64) {
         self.config.update_interval_ms = interval_ms.max(1);
         let ring = self.required_ack_ring();
         self.config.ack_ring = ring;
@@ -470,7 +470,7 @@ impl CellAccounting {
             state.due_override = false;
             self.emitted_any[*index as usize] = true;
         }
-        self.last_sent_frame_id = self.last_sent_frame_id.max(update_id);
+        self.last_sent_update_id = self.last_sent_update_id.max(update_id);
         self.ring.push_back(UpdateRecord { update_id, cells });
         let ring = self.required_ack_ring();
         self.config.ack_ring = ring;
@@ -489,13 +489,13 @@ impl CellAccounting {
         self.last_ack_at_ms = Some(now_ms);
         // An ack can never name a update we did not send; clamping keeps a
         // bogus (or cross-session) ack from clearing unemitted history.
-        let effective = ack.highest_applied_update_id.min(self.last_sent_frame_id);
+        let effective = ack.highest_applied_update_id.min(self.last_sent_update_id);
         let applied: Vec<u64> = ack
-            .applied_frames()
-            .filter(|update| *update <= self.last_sent_frame_id)
+            .applied_updates()
+            .filter(|update| *update <= self.last_sent_update_id)
             .collect();
-        outcome.applied_frames = applied.len() as u32;
-        self.counters.applied_frames += u64::from(outcome.applied_frames);
+        outcome.applied_updates = applied.len() as u32;
+        self.counters.applied_updates += u64::from(outcome.applied_updates);
 
         // A update outside the ring means the sender cannot reconstruct the
         // coverage: mark every cell emitted after the last applied id as due
@@ -659,7 +659,7 @@ impl CellAccounting {
     /// Convergence: `pending = ∅` and the last update is applied.
     pub fn converged(&self) -> bool {
         self.pending.iter().all(|state| !state.ever_sent)
-            && self.last_applied_update_id >= self.last_sent_frame_id
+            && self.last_applied_update_id >= self.last_sent_update_id
     }
 
     /// The last update id the receiver acked as applied.
@@ -668,8 +668,8 @@ impl CellAccounting {
     }
 
     /// The last update id this sender emitted for the receiver.
-    pub fn last_sent_frame_id(&self) -> u64 {
-        self.last_sent_frame_id
+    pub fn last_sent_update_id(&self) -> u64 {
+        self.last_sent_update_id
     }
 
     /// The last ack's session time.
@@ -706,7 +706,7 @@ impl CellAccounting {
     }
 
     /// Update ids currently in the ring, oldest first.
-    pub fn ring_frames(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn ring_updates(&self) -> impl Iterator<Item = u64> + '_ {
         self.ring.iter().map(|record| record.update_id)
     }
 
@@ -726,7 +726,7 @@ impl CellAccounting {
         self.emitted_any.iter_mut().for_each(|flag| *flag = false);
         self.ring.clear();
         self.last_applied_update_id = 0;
-        self.last_sent_frame_id = 0;
+        self.last_sent_update_id = 0;
         self.last_ack_at_ms = None;
         self.stuck_cells.clear();
     }
@@ -849,10 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn stream_repair_delay_is_rtt_plus_frame_interval() {
+    fn stream_repair_delay_is_rtt_plus_update_interval() {
         let mut accounting = accounting(200, 200, false);
         accounting.set_rtt_ms(1_000.0);
-        accounting.set_frame_interval_ms(200);
+        accounting.set_update_interval_ms(200);
         assert_eq!(accounting.repair_delay_ms(), 1_200);
         accounting.set_rtt_ms(10_000.0);
         assert_eq!(accounting.repair_delay_ms(), 3_000, "ceiling");
@@ -939,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn convergence_requires_pending_empty_and_last_frame_applied() {
+    fn convergence_requires_pending_empty_and_last_update_applied() {
         let mut accounting = accounting(200, 200, false);
         accounting.mark_emitted(1, &[0, 1], 0);
         accounting.mark_emitted(2, &[2], 10);
@@ -951,7 +951,7 @@ mod tests {
         accounting.apply_ack(&ack(2, 0b1), 30);
         assert!(accounting.converged());
         assert_eq!(accounting.last_applied_update_id(), 2);
-        assert_eq!(accounting.last_sent_frame_id(), 2);
+        assert_eq!(accounting.last_sent_update_id(), 2);
     }
 
     #[test]
@@ -965,12 +965,12 @@ mod tests {
     }
 
     #[test]
-    fn ack_ring_scales_with_rtt_and_frame_interval() {
+    fn ack_ring_scales_with_rtt_and_update_interval() {
         let mut accounting = accounting(200, 200, true);
         accounting.set_rtt_ms(2_000.0);
-        accounting.set_frame_interval_ms(1_000);
+        accounting.set_update_interval_ms(1_000);
         assert_eq!(accounting.required_ack_ring(), 64, "floor wins");
-        accounting.set_frame_interval_ms(33);
+        accounting.set_update_interval_ms(33);
         assert_eq!(accounting.required_ack_ring(), 130);
         assert_eq!(accounting.ring_len(), 0);
     }
@@ -983,7 +983,7 @@ mod tests {
         let previous = accounting.set_geometry(CellGrid::with_cell_size(640, 480, 64));
         assert_eq!(previous.cells(), cells_before);
         assert_eq!(accounting.pending_count(), 0);
-        assert_eq!(accounting.last_sent_frame_id(), 0);
+        assert_eq!(accounting.last_sent_update_id(), 0);
         assert_eq!(accounting.counters().epoch_resets, 1);
         // A geometry that maps to the same key is a no-op.
         let same = accounting.set_geometry(*accounting.grid());
@@ -1030,7 +1030,7 @@ mod tests {
             let outcome = accounting.apply_ack(&ack(update, 0b1), now);
             if outcome.converged {
                 assert_eq!(accounting.pending_count(), 0);
-                assert!(accounting.last_applied_update_id() >= accounting.last_sent_frame_id());
+                assert!(accounting.last_applied_update_id() >= accounting.last_sent_update_id());
             }
         }
     }

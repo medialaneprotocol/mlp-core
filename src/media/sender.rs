@@ -43,7 +43,7 @@ pub enum MediaSenderEvent {
     /// An anchor plan started; the driver sends `MediaAnchorPlan`.
     ///
     /// The plan's bands are not events: each band is a update the driver pulls
-    /// through [`MediaSenderMachine::plan_next_frame`], and the plan advances by
+    /// through [`MediaSenderMachine::plan_next_update`], and the plan advances by
     /// exactly the bands it encoded (MLP spec §7.2). A plan that advanced on a
     /// poll would skip the cells of every band it did not paint.
     PlanStarted {
@@ -141,7 +141,7 @@ pub struct SenderStats {
     /// Cursor objects coalesced by the latest-wins slot.
     pub cursors_coalesced: u64,
     /// Idle updates emitted.
-    pub idle_frames: u64,
+    pub idle_updates: u64,
     /// Control objects enqueued.
     pub control_objects: u64,
 }
@@ -180,7 +180,7 @@ pub struct MediaSenderConfig {
     /// `loss_estimate > 30‰` enables duplication.
     pub duplicate_loss_ratio: f64,
     /// Emit idle updates to keep the ack timeline alive.
-    pub idle_frames: bool,
+    pub idle_updates: bool,
     /// The estimator policy.
     pub bwe: BweConfig,
     /// Plan policy.
@@ -207,7 +207,7 @@ impl MediaSenderConfig {
             max_in_flight_wait_ms: 10_000,
             duplicate_max_bytes: 2_048,
             duplicate_loss_ratio: 0.03,
-            idle_frames: true,
+            idle_updates: true,
             bwe: BweConfig::default(),
             plan: PlanConfig {
                 anchor_threshold: (grid.cells() / 4).max(16),
@@ -223,7 +223,7 @@ impl MediaSenderConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRequest {
     /// The serialized chunk payloads, in chunk order.
-    pub chunks: Vec<Vec<u8>>,
+    pub parts: Vec<Vec<u8>>,
     /// Cells the update's regions cover (advances `E`).
     pub cells: Vec<u32>,
     /// Whether the update may apply onto any held state.
@@ -232,7 +232,7 @@ pub struct UpdateRequest {
     pub kind: UpdateKind,
     /// Highest input sequence reflected by this update.
     pub reflects_input_seq: u64,
-    /// Total codec update bytes (all chunks).
+    /// Total codec update bytes (all parts).
     pub update_bytes: u32,
     /// Whether the update is echo-critical (typing).
     pub echo_critical: bool,
@@ -244,7 +244,7 @@ impl UpdateRequest {
     /// A single-chunk delta update.
     pub fn delta(chunk: Vec<u8>, cells: Vec<u32>) -> Self {
         Self {
-            chunks: vec![chunk],
+            parts: vec![chunk],
             cells,
             anchor: false,
             kind: UpdateKind::Delta,
@@ -258,7 +258,7 @@ impl UpdateRequest {
     /// An idle update: no cells, no cells.
     pub fn idle() -> Self {
         Self {
-            chunks: vec![Vec::new()],
+            parts: vec![Vec::new()],
             cells: Vec::new(),
             anchor: false,
             kind: UpdateKind::Idle,
@@ -654,7 +654,7 @@ pub struct MediaSenderMachine {
     objects: Vec<OutboundObject>,
     next_object_id: u32,
     next_update_id: u64,
-    last_emitted_frame_id: u64,
+    last_emitted_update_id: u64,
     started: Instant,
     cursor_slot: Option<usize>,
     stats: SenderStats,
@@ -690,7 +690,7 @@ impl MediaSenderMachine {
             objects: Vec::new(),
             next_object_id: 1,
             next_update_id: 1,
-            last_emitted_frame_id: 0,
+            last_emitted_update_id: 0,
             started: now,
             cursor_slot: None,
             stats: SenderStats::default(),
@@ -829,21 +829,21 @@ impl MediaSenderMachine {
     /// The sender allocates the update id, chains `update_base` from the last
     /// emitted update and attaches the update TLVs; the payload of each chunk is
     /// the driver's serialized update object.
-    pub fn enqueue_frame(&mut self, update: UpdateRequest, now: Instant) -> EnqueueOutcome {
+    pub fn enqueue_update(&mut self, update: UpdateRequest, now: Instant) -> EnqueueOutcome {
         if !self.policy.emits_media() {
             return EnqueueOutcome::Deferred {
                 reason: RejectReason::LaneDisabled,
             };
         }
-        if update.chunks.is_empty() {
+        if update.parts.is_empty() {
             return EnqueueOutcome::Deferred {
                 reason: RejectReason::BodyInvalid,
             };
         }
         let estimate = self.last_estimate;
-        // The encoder must produce chunks that fit one object per the budget,
+        // The encoder must produce parts that fit one object per the budget,
         // and never need segmentation on a datagram carrier (MLP spec §7.1).
-        for chunk in &update.chunks {
+        for chunk in &update.parts {
             let cap = if self.config.carrier.is_datagram() {
                 estimate
                     .max_object_bytes
@@ -859,14 +859,14 @@ impl MediaSenderMachine {
                 };
             }
         }
-        let max_chunks = self
+        let max_parts = self
             .scheduler
             .max_chunks_for(self.config.carrier.is_datagram(), estimate.loss_ratio);
-        if update.chunks.len() > usize::from(max_chunks.max(1)) {
+        if update.parts.len() > usize::from(max_parts.max(1)) {
             self.stats.object_oversize_total += 1;
             return EnqueueOutcome::Oversize {
-                bytes: update.chunks.iter().map(Vec::len).sum(),
-                cap: u32::from(max_chunks),
+                bytes: update.parts.iter().map(Vec::len).sum(),
+                cap: u32::from(max_parts),
             };
         }
         // Bounded write queue: at most `in_flight_cap` media objects may be
@@ -889,10 +889,10 @@ impl MediaSenderMachine {
         // cannot be the base of the next delta (MLP spec §7.1).
         let update_base = self.accounting.last_applied_update_id();
         let session_ms = self.session_ms(now);
-        let part_count = update.chunks.len() as u16;
+        let part_count = update.parts.len() as u16;
         let mut first_object_id = 0;
         let mut last_fragments = 1u16;
-        for (index, chunk) in update.chunks.iter().enumerate() {
+        for (index, chunk) in update.parts.iter().enumerate() {
             let meta = UpdateMeta {
                 update_id,
                 update_base,
@@ -952,10 +952,10 @@ impl MediaSenderMachine {
         }
         let _ = first_object_id;
         self.next_update_id = self.next_update_id.wrapping_add(1).max(1);
-        self.last_emitted_frame_id = update_id;
+        self.last_emitted_update_id = update_id;
         self.accounting
             .mark_emitted(update_id, &update.cells, session_ms);
-        self.scheduler.timer_mut().on_frame(session_ms);
+        self.scheduler.timer_mut().on_update(session_ms);
         let slot = match update.kind {
             UpdateKind::Delta => 0,
             UpdateKind::Anchor => 1,
@@ -1305,7 +1305,7 @@ impl MediaSenderMachine {
     /// the accounting demands it (MLP spec §8).
     ///
     /// A running plan's bands are pulled by the update path alone
-    /// ([`Self::plan_next_frame`] → `Scheduler::schedule`): a band is only a
+    /// ([`Self::plan_next_update`] → `Scheduler::schedule`): a band is only a
     /// band once it is a update, so a poll that took one would advance the plan
     /// without painting its cells.
     pub fn poll_plans(&mut self, now: Instant) -> Vec<MediaSenderEvent> {
@@ -1388,7 +1388,7 @@ impl MediaSenderMachine {
     }
 
     /// Build the next scheduled update from the accounting and capture state.
-    pub fn plan_next_frame(
+    pub fn plan_next_update(
         &mut self,
         fresh: &[u32],
         refresh: &[u32],
@@ -1399,13 +1399,13 @@ impl MediaSenderMachine {
         let budget = UpdateBudget {
             bytes: self.last_estimate.budget_bytes,
             max_object_bytes: self.last_estimate.max_object_bytes,
-            max_chunks: self.scheduler.max_chunks_for(
+            max_parts: self.scheduler.max_chunks_for(
                 self.config.carrier.is_datagram(),
                 self.last_estimate.loss_ratio,
             ),
             update_interval_ms: self.last_estimate.update_interval().as_millis() as u32,
-            max_chunk_wire_bytes: 491_520,
-            path_chunk_cap: self.config.fragment_payload_max as u32,
+            max_part_wire_bytes: 491_520,
+            path_part_cap: self.config.fragment_payload_max as u32,
         };
         // The sender sets ANCHOR whenever it knows the receiver may not be able to
         // chain: strict patch mode, a running plan, a update that repairs cells
@@ -1609,7 +1609,7 @@ impl MediaSenderMachine {
 
     /// An idle update request when the timeline needs one.
     pub fn poll_idle(&mut self, now: Instant) -> Option<UpdateRequest> {
-        if !self.config.idle_frames {
+        if !self.config.idle_updates {
             return None;
         }
         let session_ms = self.session_ms(now);
@@ -1617,7 +1617,7 @@ impl MediaSenderMachine {
             return None;
         }
         self.scheduler.on_idle(session_ms);
-        self.stats.idle_frames += 1;
+        self.stats.idle_updates += 1;
         Some(UpdateRequest::idle())
     }
 
@@ -1637,7 +1637,7 @@ impl MediaSenderMachine {
     }
 
     /// Debug view of the write queue: `(object_id, next_fragment,
-    /// fragment_count, is_media_frame)`.
+    /// fragment_count, is_media_update)`.
     pub fn debug_queue(&self) -> Vec<(u32, u16, u16, bool)> {
         self.objects
             .iter()
@@ -1921,7 +1921,7 @@ impl MediaSenderMachine {
         let session_ms = self.session_ms(now);
         self.accounting.set_rtt_ms(self.estimator.rtt_ms());
         self.accounting
-            .set_frame_interval_ms(estimate.update_interval().as_millis().max(1) as u64);
+            .set_update_interval_ms(estimate.update_interval().as_millis().max(1) as u64);
         self.scheduler.set_rtt_ms(self.estimator.rtt_ms());
         let _ = session_ms;
     }
@@ -1972,7 +1972,7 @@ impl StateMachine for MediaSenderMachine {
             MediaSenderInput::ProbeEcho(echo) => self.on_probe_echo(echo, now),
             MediaSenderInput::RemoteClose(close) => self.on_remote_close(&close, now),
             MediaSenderInput::Update(update) => {
-                let outcome = self.enqueue_frame(*update, now);
+                let outcome = self.enqueue_update(*update, now);
                 match outcome {
                     EnqueueOutcome::Oversize { bytes, cap } => {
                         vec![MediaSenderEvent::ObjectOversize { bytes, cap }]
@@ -2032,11 +2032,11 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_frame_segments_and_releases_in_order() {
+    fn enqueue_update_segments_and_releases_in_order() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
         let update = UpdateRequest::delta(vec![7u8; 100], vec![0, 1, 2]);
-        let outcome = sender.enqueue_frame(update, now);
+        let outcome = sender.enqueue_update(update, now);
         assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
         assert_eq!(sender.accounting().pending_count(), 3);
         let mut released = 0;
@@ -2071,7 +2071,7 @@ mod tests {
         sender.on_feedback(feedback, now);
         let cap = sender.estimate().max_object_bytes as usize;
         let big = UpdateRequest::delta(vec![0u8; cap + 1], vec![0]);
-        let outcome = sender.enqueue_frame(big, now);
+        let outcome = sender.enqueue_update(big, now);
         assert!(matches!(outcome, EnqueueOutcome::Oversize { .. }));
         assert_eq!(sender.stats().object_oversize_total, 1);
     }
@@ -2082,11 +2082,11 @@ mod tests {
         let mut sender = sender(Carrier::Ws);
         for index in 0..2u32 {
             let outcome =
-                sender.enqueue_frame(UpdateRequest::delta(vec![1, 2, 3], vec![index]), now);
+                sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![index]), now);
             assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
         }
         assert_eq!(sender.in_flight(), 2);
-        let third = sender.enqueue_frame(UpdateRequest::delta(vec![1, 2, 3], vec![5]), now);
+        let third = sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![5]), now);
         assert!(matches!(third, EnqueueOutcome::Deferred { .. }));
         assert_eq!(sender.stats().in_flight_deferred_total, 1);
         // Releasing a queued object frees the slot; an ack does not have to
@@ -2094,7 +2094,7 @@ mod tests {
         // job, not a throughput gate).
         assert!(sender.poll_fragment(now).is_some());
         assert!(sender.in_flight() <= 1);
-        let accepted = sender.enqueue_frame(UpdateRequest::delta(vec![1, 2, 3], vec![6]), now);
+        let accepted = sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![6]), now);
         assert!(matches!(accepted, EnqueueOutcome::Accepted { .. }));
     }
 
@@ -2102,7 +2102,7 @@ mod tests {
     fn control_objects_go_first_and_carry_urgent() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
-        sender.enqueue_frame(UpdateRequest::delta(vec![0u8; 8_000], vec![0]), now);
+        sender.enqueue_update(UpdateRequest::delta(vec![0u8; 8_000], vec![0]), now);
         let body = MediaControlObject::Close(MediaClose {
             code: MediaCloseCode::Park,
             reason: "park".into(),
@@ -2161,7 +2161,7 @@ mod tests {
         let mut update = UpdateRequest::delta(vec![9u8; 100], vec![0]);
         update.echo_critical = true;
         assert!(matches!(
-            sender.enqueue_frame(update, now),
+            sender.enqueue_update(update, now),
             EnqueueOutcome::Accepted { .. }
         ));
         // Pacing needs time: the pacer reports a wait, the driver advances.
@@ -2219,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plans_bands_are_pulled_by_frames_and_cover_its_cell_list() {
+    fn a_plans_bands_are_pulled_by_updates_and_cover_its_cell_list() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
         let changed = sender.set_grid(CellGrid::with_cell_size(640, 480, 64), now);
@@ -2248,7 +2248,7 @@ mod tests {
         let mut covered: Vec<u32> = Vec::new();
         let mut bands = 0_u32;
         while sender.scheduler().plans().is_active() {
-            let decision = sender.plan_next_frame(&[], &[], now);
+            let decision = sender.plan_next_update(&[], &[], now);
             assert!(
                 decision.plan_id.is_some(),
                 "an active plan owns the update: {:?}",

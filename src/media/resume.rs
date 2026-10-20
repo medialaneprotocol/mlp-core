@@ -188,7 +188,7 @@ pub struct HeldViewerState {
     /// The next update id the sender will use.
     pub next_update_id: u64,
     /// The last update id the sender emitted.
-    pub last_sent_frame_id: u64,
+    pub last_sent_update_id: u64,
     /// Cells the sender knows are unacked.
     pub pending_cells: u64,
     /// Held keys and buttons.
@@ -210,7 +210,7 @@ impl Default for HeldViewerState {
         Self {
             epoch: 0,
             next_update_id: 1,
-            last_sent_frame_id: 0,
+            last_sent_update_id: 0,
             pending_cells: 0,
             pressed: Vec::new(),
             input_seq_next: 0,
@@ -321,7 +321,7 @@ pub fn decide_resume(
         if starts_fresh {
             state.epoch = state.epoch.wrapping_add(1);
             state.next_update_id = state.next_update_id.max(1);
-            state.last_sent_frame_id = 0;
+            state.last_sent_update_id = 0;
             state.pending_cells = state.pending_cells.max(1);
             actions.push(ResumeAction::StartAnchorPlan {
                 reason: PlanStartReason::Resume,

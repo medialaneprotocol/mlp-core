@@ -155,7 +155,7 @@ fn t4_extreme_stays_alive_and_honest() {
     );
 }
 
-/// A 30 s outage: the lane parks and resumes with no reset frame and one media
+/// A 30 s outage: the lane parks and resumes with no reset update and one media
 /// session (INV-9).
 #[test]
 fn a_thirty_second_outage_parks_and_resumes() {
@@ -252,7 +252,7 @@ fn hop_drops_are_attributed() {
     );
 }
 
-/// A carrier switch mid-session carries the same frame chain.
+/// A carrier switch mid-session carries the same update chain.
 #[test]
 fn a_path_switch_is_transparent() {
     let scenario = Scenario::new("path-switch", Tier::T2)
@@ -599,7 +599,7 @@ fn t3_recovery_fully_attributed() {
 }
 
 /// **S-9** — resume without reset under T1: the media lane dies and comes back
-/// with the same chain, no epoch change, no reset frame (INV-2).
+/// with the same chain, no epoch change, no reset update (INV-2).
 #[test]
 fn t1_resume_rebases_not_resets() {
     let scenario = Scenario::new("s9-resume-rebase", Tier::T1)
@@ -681,7 +681,7 @@ fn t3_no_stuck_keys_ever() {
     );
 }
 
-/// **S-11** — typing under T4 is text-first and honest: at least one frame per
+/// **S-11** — typing under T4 is text-first and honest: at least one update per
 /// second, the lane never claims `live`, and the echo is reported.
 #[test]
 fn t4_typing_text_first_floor() {
@@ -714,7 +714,7 @@ fn t4_typing_text_first_floor() {
 }
 
 /// **S-11** — audio is off at T4 by policy: the media lane's whole budget is
-/// smaller than an audio stream, so no audio frame can exist on it (D-17).
+/// smaller than an audio stream, so no audio update can exist on it (D-17).
 #[test]
 fn t4_no_audio_default() {
     let scenario = typing(Tier::T4, 4, 600, 10_000);
@@ -901,7 +901,7 @@ fn t2_single_lane_priority_preserved() {
 }
 
 /// **S-14** — T0 regression guard: the fixture-level properties are pacing that
-/// never delays a frame, zero gap applications and an immediate convergence.
+/// never delays a update, zero gap applications and an immediate convergence.
 #[test]
 fn t0_identical_to_baseline_behaviour() {
     let scenario = Scenario::new("s14-lan-baseline", Tier::T0)
@@ -922,11 +922,11 @@ fn t0_identical_to_baseline_behaviour() {
     let echo = trace.echo_p95_ms().expect("an echo at T0");
     assert!(echo <= 50, "T0 echo p95 {echo} ms above the 50 ms guard");
     // The fixture's timing granularity is one 10 ms tick, so "pacing never
-    // delays a frame" is asserted as "no wait beyond a tick and waits are rare":
+    // delays a update" is asserted as "no wait beyond a tick and waits are rare":
     // the pacer is not the limiter on a LAN.
     assert!(
         trace.counters.max_pacer_wait_ms <= 25,
-        "pacing never delayed a frame beyond one tick at T0: {} ms",
+        "pacing never delayed a update beyond one tick at T0: {} ms",
         trace.counters.max_pacer_wait_ms
     );
     println!(
@@ -984,7 +984,7 @@ fn lane_unsupported_degrades_not_fails() {
         media_lane_enabled: false,
         ..MediaLanePolicy::default()
     });
-    let media = machine.enqueue_frame(
+    let media = machine.enqueue_update(
         mlp_core::media::sender::UpdateRequest::delta(vec![0; 64], vec![0, 1]),
         now,
     );

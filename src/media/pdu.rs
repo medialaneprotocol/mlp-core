@@ -970,7 +970,7 @@ pub fn fragment_count_for(payload_len: usize, fragment_payload_max: usize) -> Op
 mod tests {
     use super::*;
 
-    fn ext_with_frame(update_id: u64) -> HeaderExt {
+    fn ext_with_update(update_id: u64) -> HeaderExt {
         let mut ext = HeaderExt::new();
         ext.push_u64(tlv::UPDATE_ID, update_id).expect("fits");
         ext
@@ -1005,7 +1005,7 @@ mod tests {
             0xDEAD_BEEF,
             1,
             3,
-            ext_with_frame(42),
+            ext_with_update(42),
             vec![1, 2, 3, 4, 5],
         )
         .expect("valid");

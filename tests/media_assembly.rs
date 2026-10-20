@@ -1,6 +1,6 @@
 //! MLP object lifecycle and assembly (design §6.4, §6.5) — INV-1's home.
 //!
-//! A partial frame is never delivered, duplicates never re-open an object, the
+//! A partial update is never delivered, duplicates never re-open an object, the
 //! table is bounded, and the assembly timeout is RTT-relative.
 
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use mlp_core::media::pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, tlv,
 };
 
-fn ext_with_frame(update_id: u64) -> HeaderExt {
+fn ext_with_update(update_id: u64) -> HeaderExt {
     let mut ext = HeaderExt::new();
     ext.push_u64(tlv::UPDATE_ID, update_id).expect("fits");
     ext.push_u32(tlv::CELL_COUNT, 510).expect("fits");
@@ -48,7 +48,7 @@ fn assembler() -> ObjectAssembler {
     ObjectAssembler::new(AssemblyConfig::default())
 }
 
-/// INV-1: a frame is applied only if every chunk arrived.
+/// INV-1: a update is applied only if every chunk arrived.
 #[test]
 fn partial_objects_are_never_delivered() {
     let now = Instant::now();
@@ -64,7 +64,7 @@ fn partial_objects_are_never_delivered() {
                 false,
                 vec![index as u8; 10],
                 if index == 0 {
-                    ext_with_frame(1)
+                    ext_with_update(1)
                 } else {
                     HeaderExt::new()
                 },
@@ -100,7 +100,7 @@ fn out_of_order_fragments_assemble_in_index_order() {
                 index == 3,
                 vec![index as u8],
                 if index == 0 {
-                    ext_with_frame(9)
+                    ext_with_update(9)
                 } else {
                     HeaderExt::new()
                 },
@@ -131,7 +131,7 @@ fn fin_is_required_even_when_every_index_arrived() {
                 2,
                 false,
                 vec![1],
-                ext_with_frame(2),
+                ext_with_update(2),
             ),
             0,
             now,
@@ -153,7 +153,7 @@ fn duplicate_fragments_and_completed_objects_are_dropped() {
         1,
         true,
         vec![1, 2, 3],
-        ext_with_frame(3),
+        ext_with_update(3),
     );
     assert!(matches!(
         assembler.accept(fragment.clone(), 0, now),
@@ -186,7 +186,7 @@ fn dedupe_window_is_bounded_and_evicts_in_order() {
                 2,
                 false,
                 vec![0],
-                ext_with_frame(u64::from(object_id)),
+                ext_with_update(u64::from(object_id)),
             ),
             0,
             now,
@@ -207,7 +207,7 @@ fn fragment_mismatch_is_rejected() {
             3,
             false,
             vec![1],
-            ext_with_frame(1),
+            ext_with_update(1),
         ),
         0,
         now,
@@ -317,7 +317,7 @@ fn open_object_budget_evicts_the_oldest() {
                 2,
                 false,
                 vec![0; 8],
-                ext_with_frame(u64::from(object_id)),
+                ext_with_update(u64::from(object_id)),
             ),
             0,
             now + Duration::from_millis(u64::from(object_id)),
@@ -347,7 +347,7 @@ fn assembly_byte_budget_is_honoured_under_pressure() {
                 4,
                 false,
                 vec![0; 1_024],
-                ext_with_frame(u64::from(object_id)),
+                ext_with_update(u64::from(object_id)),
             ),
             0,
             now,
@@ -381,7 +381,7 @@ fn assembly_timeout_is_injected_and_bounded() {
             2,
             false,
             vec![0],
-            ext_with_frame(1),
+            ext_with_update(1),
         ),
         0,
         now,
@@ -430,7 +430,7 @@ fn body_classification_rejects_media_without_metadata() {
 fn media_object_helpers_expose_the_metadata() {
     let now = Instant::now();
     let mut assembler = assembler();
-    let mut ext = ext_with_frame(77);
+    let mut ext = ext_with_update(77);
     ext.push_u32(tlv::ECHO_OF_OBJECT_ID, 5).expect("fits");
     ext.push_u64(tlv::SEND_EPOCH_MS, 1_500).expect("fits");
     let outcome = assembler.accept(
@@ -490,7 +490,7 @@ fn completed_objects_are_not_reopened_by_late_fragments() {
         2,
         false,
         vec![1],
-        ext_with_frame(1),
+        ext_with_update(1),
     );
     match assembler.accept(first.clone(), 0, now) {
         AssemblyOutcome::Object(object) => assert_eq!(object.payload, vec![1, 2]),
@@ -516,7 +516,7 @@ fn media_objects_on_the_datagram_carrier_are_single_fragment_by_construction() {
         1,
         true,
         vec![0; 1_150],
-        ext_with_frame(1),
+        ext_with_update(1),
     );
     let bytes = fragment.encode();
     let parsed = mlp_core::media::pdu::parse_message(&bytes, Carrier::DataChannel)

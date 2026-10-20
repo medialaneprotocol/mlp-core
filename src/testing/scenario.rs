@@ -67,7 +67,7 @@ pub enum Invariant {
     Inv4,
     /// Queues never exceed their configured caps.
     Inv5,
-    /// No object above `max_object_bytes`; no update above `max_chunks × cap`.
+    /// No object above `max_object_bytes`; no update above `max_parts × cap`.
     Inv6,
     /// Sent bytes in any 1 s window stay inside the pacer's window budget.
     Inv7,
@@ -428,8 +428,8 @@ pub struct IntermediaryModel {
 #[derive(Debug, Clone, Default)]
 struct ViewerModel {
     canvas: Vec<u64>,
-    applied_frames: u64,
-    received_frames: HashSet<u64>,
+    applied_updates: u64,
+    received_updates: HashSet<u64>,
     updates: HashMap<u64, Vec<u32>>,
     last_apply_ms: u64,
 }
@@ -712,9 +712,9 @@ impl Sim {
             return;
         }
         if let Some(idle) = self.sender.poll_idle(now) {
-            if let EnqueueOutcome::Accepted { .. } = self.sender.enqueue_frame(idle, now) {
+            if let EnqueueOutcome::Accepted { .. } = self.sender.enqueue_update(idle, now) {
                 let update_id = self.sender.next_update_id() - 1;
-                self.record_frame(update_id, "idle", 0, 0);
+                self.record_update(update_id, "idle", 0, 0);
             }
             return;
         }
@@ -728,11 +728,11 @@ impl Sim {
             .map(|(index, _)| index as u32)
             .take(64)
             .collect();
-        let decision = self.sender.plan_next_frame(&fresh, &refresh, now);
+        let decision = self.sender.plan_next_update(&fresh, &refresh, now);
         if decision.cells.is_empty() {
             return;
         }
-        let payload = self.encode_frame_payload(&decision);
+        let payload = self.encode_update_payload(&decision);
         let estimate = self.sender.estimate();
         let max_object = estimate.max_object_bytes as usize;
         if payload.len() > max_object {
@@ -741,7 +741,7 @@ impl Sim {
             return;
         }
         let request = UpdateRequest {
-            chunks: vec![payload],
+            parts: vec![payload],
             cells: decision.cells.clone(),
             anchor: decision.anchor,
             kind: decision.kind,
@@ -750,7 +750,7 @@ impl Sim {
             echo_critical: false,
             deadline_epoch_ms: None,
         };
-        match self.sender.enqueue_frame(request, now) {
+        match self.sender.enqueue_update(request, now) {
             EnqueueOutcome::Accepted { .. } => {
                 let update_id = self.sender.next_update_id() - 1;
                 for cell in &decision.cells {
@@ -760,7 +760,7 @@ impl Sim {
                 self.host_model
                     .updates
                     .insert(update_id, decision.cells.clone());
-                self.record_frame(
+                self.record_update(
                     update_id,
                     decision.kind.as_str(),
                     decision.cells.len() as u32,
@@ -863,7 +863,7 @@ impl Sim {
         }
     }
 
-    fn record_frame(&mut self, update_id: u64, kind: &str, cells: u32, bytes: u32) {
+    fn record_update(&mut self, update_id: u64, kind: &str, cells: u32, bytes: u32) {
         self.trace.updates.push(UpdateTrace {
             at_ms: self.now_ms,
             update_id,
@@ -881,7 +881,7 @@ impl Sim {
             .idle_due(session_ms, self.sender.estimator().rtt_ms())
     }
 
-    fn encode_frame_payload(&self, decision: &ScheduleDecision) -> Vec<u8> {
+    fn encode_update_payload(&self, decision: &ScheduleDecision) -> Vec<u8> {
         let mut payload = vec![0u8; SIM_BITMAP_BYTES];
         for cell in &decision.cells {
             let byte = (*cell as usize) / 8;
@@ -1057,11 +1057,11 @@ impl Sim {
                         continue;
                     }
                     // INV-1: the machine only completes objects with every
-                    // fragment and FIN, so an apply here always has all chunks.
+                    // fragment and FIN, so an apply here always has all parts.
                     if meta.part_count != 1 {
                         self.violate(
                             Invariant::Inv1,
-                            "a multi-chunk update arrived without its chunks",
+                            "a multi-chunk update arrived without its parts",
                         );
                         continue;
                     }
@@ -1073,7 +1073,7 @@ impl Sim {
                         && meta.update_base != 0
                         && !self
                             .viewer_model
-                            .received_frames
+                            .received_updates
                             .contains(&meta.update_base)
                     {
                         self.trace.counters.updates_gapped += 1;
@@ -1087,9 +1087,9 @@ impl Sim {
                     self.viewer_model
                         .updates
                         .insert(meta.update_id, cells.clone());
-                    self.viewer_model.received_frames.insert(meta.update_id);
+                    self.viewer_model.received_updates.insert(meta.update_id);
                     self.receiver.note_applied(meta.update_id);
-                    self.viewer_model.applied_frames += 1;
+                    self.viewer_model.applied_updates += 1;
                     self.viewer_model.last_apply_ms = self.now_ms;
                     self.trace.counters.updates_applied += 1;
                     // Design §4.1: the ack is a C4 object at priority 0, sent
@@ -1190,7 +1190,7 @@ impl Sim {
     }
 
     fn model_converged(&self) -> bool {
-        self.viewer_model.applied_frames > 0
+        self.viewer_model.applied_updates > 0
             && self.viewer_model.last_apply_ms >= self.last_change_ms
     }
 
@@ -1484,7 +1484,7 @@ impl Sim {
                 // Every applied update was complete by construction; assert the
                 // property the machine guarantees.
                 assert!(
-                    self.receiver.stats().objects_by_class[2] >= self.viewer_model.applied_frames,
+                    self.receiver.stats().objects_by_class[2] >= self.viewer_model.applied_updates,
                     "the receiver applied more updates than it received objects"
                 );
             }

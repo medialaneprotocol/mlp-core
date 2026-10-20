@@ -1,5 +1,5 @@
 //! Bandwidth estimation (design §7.2, D-2): the algorithm, its constants and
-//! the RTT-relative behaviour the whole timeout framework depends on.
+//! the RTT-relative behaviour the whole timeout updatework depends on.
 
 use std::time::{Duration, Instant};
 
@@ -161,7 +161,7 @@ fn a_cold_session_is_not_no_feedback() {
 #[test]
 fn budgets_follow_the_design_formulas() {
     let now = Instant::now();
-    // 100 Mbps ceiling, T0-ish RTT: 30 fps and a budget of one frame interval.
+    // 100 Mbps ceiling, T0-ish RTT: 30 fps and a budget of one update interval.
     let mut fast = BandwidthEstimator::new(BweConfig::default());
     for _ in 0..8 {
         fast.on_feedback(&healthy(5, 10_000_000), now);
