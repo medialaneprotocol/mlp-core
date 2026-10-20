@@ -31,6 +31,27 @@ pub const REPAIR_DELAY_STREAM_CEIL_MS: u64 = 3_000;
 /// The floor of the ack ring, in updates (MLP spec §8).
 pub const ACK_RING_FLOOR: usize = 64;
 
+/// The repair delay the specification's rule gives a link (MLP spec §9.1).
+///
+/// A stream carrier waits `clamp(RTT + update_interval, 250 ms, 3 s)` before
+/// it re-sends a cell the receiver has not acknowledged, and a datagram
+/// carrier `clamp(2 × RTT, 250 ms, 5 s)`. The delay is a function of the
+/// link's own RTT: a fast link repairs sooner, and no tier is handed another
+/// tier's grace.
+pub fn repair_delay_ms(datagram: bool, rtt_ms: f64, update_interval_ms: u64) -> u64 {
+    if datagram {
+        (2.0 * rtt_ms).round().clamp(
+            REPAIR_DELAY_DATAGRAM_FLOOR_MS as f64,
+            REPAIR_DELAY_DATAGRAM_CEIL_MS as f64,
+        ) as u64
+    } else {
+        (rtt_ms + update_interval_ms as f64).round().clamp(
+            REPAIR_DELAY_DATAGRAM_FLOOR_MS as f64,
+            REPAIR_DELAY_STREAM_CEIL_MS as f64,
+        ) as u64
+    }
+}
+
 /// A cell rectangle in surface coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CellRect {
@@ -551,21 +572,13 @@ impl CellAccounting {
         outcome
     }
 
-    /// The repair delay in ms (MLP spec §8).
+    /// The repair delay in ms (MLP spec §9.1).
     pub fn repair_delay_ms(&self) -> u64 {
-        if self.config.datagram {
-            (2.0 * self.config.rtt_ms).round().clamp(
-                REPAIR_DELAY_DATAGRAM_FLOOR_MS as f64,
-                REPAIR_DELAY_DATAGRAM_CEIL_MS as f64,
-            ) as u64
-        } else {
-            (self.config.rtt_ms + self.config.update_interval_ms as f64)
-                .round()
-                .clamp(
-                    REPAIR_DELAY_DATAGRAM_FLOOR_MS as f64,
-                    REPAIR_DELAY_STREAM_CEIL_MS as f64,
-                ) as u64
-        }
+        repair_delay_ms(
+            self.config.datagram,
+            self.config.rtt_ms,
+            self.config.update_interval_ms,
+        )
     }
 
     /// Cells that are due for this receiver, ordered `(reason, index)`.

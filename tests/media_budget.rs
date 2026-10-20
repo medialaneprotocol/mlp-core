@@ -4,14 +4,45 @@
 //! convergence time, echo budgets and the timeout arithmetic. Every assertion
 //! is derived from a policy constant, never from an ad-hoc value.
 
-use mlp_core::media::cells::CellRect;
+use mlp_core::media::cells::{CellAccountingConfig, CellRect, repair_delay_ms};
 use mlp_core::media::input::InputKind;
 use mlp_core::media::lifecycle::{CapturePolicy, MediaLanePolicy};
 use mlp_core::media::resume::{ParkPolicy, ReconnectLadder};
 use mlp_core::media::scheduler::UpdateBudget;
 use mlp_core::media::{MAX_MEDIA_VIEWERS_PER_HOST, MediaPath};
 use mlp_core::testing::lossy_link::{LinkProfile, Tier};
-use mlp_core::testing::scenario::{Invariant, Scenario, Step, cold_start_scenario, run};
+use mlp_core::testing::scenario::{
+    Invariant, SIM_TICK_MS, Scenario, Step, carrier_for_tier, cold_start_scenario, run,
+};
+
+/// The repair delay the tier's own link produces (MLP spec §9.1).
+///
+/// The rule is a function of the RTT: a stream carrier waits
+/// `clamp(RTT + update_interval, 250 ms, 3 s)` and a datagram carrier
+/// `clamp(2 × RTT, 250 ms, 5 s)`. The update interval is the sender's own
+/// cadence policy — the accounting's default, 30 fps — so the delay is the
+/// tier's own and never one flat number handed to every tier.
+fn tier_repair_delay_ms(tier: Tier, rtt_ms: f64) -> u64 {
+    repair_delay_ms(
+        carrier_for_tier(tier).is_datagram(),
+        rtt_ms,
+        CellAccountingConfig::default().update_interval_ms,
+    )
+}
+
+/// The residue a tier leaves after the quiet phase, measured on the committed
+/// scenario: T0 0, T1 0, T2 0, T3 1 of 510 cells — and T4 2, which is
+/// asserted on its own bound.
+///
+/// The promise is convergence to the current screen (MLP spec §2.1), so the
+/// bound is what the tiers actually leave — not a fraction of the surface.
+fn tier_residue_cells(tier: Tier) -> u32 {
+    match tier {
+        Tier::T0 | Tier::T1 | Tier::T2 => 0,
+        Tier::T3 => 1,
+        Tier::T4 => 2,
+    }
+}
 
 /// One motion scenario per tier, at the tier's own pace.
 fn tier_scenario(tier: Tier, quiet_ms: u64) -> Scenario {
@@ -85,15 +116,26 @@ fn inv7_rate_windows_hold_on_every_tier() {
 
 /// Convergence: after motion stops, the pending set drains — on every tier.
 ///
-/// T4's promise is "convergence to the current screen within 2×RTT + 30 s of
-/// link restoration" (design §3.1), which is longer than this scenario's quiet
-/// phase at a 35 % loss: T4 is asserted on a bounded residue, and its
-/// convergence is *reported* (N-3).
+/// The promise is convergence to the current screen within `2 × RTT + 30 s` of
+/// link restoration (design §3.1); the quiet phase here is 12 s, and the tiers
+/// are measured, not excused: what they leave pending after it is the bound.
+///
+/// T4's promise is longer than this scenario's quiet phase at a 35 % loss:
+/// T4 is asserted on a bounded residue, and its convergence is *reported*
+/// (N-3).
 #[test]
 fn every_tier_converges_after_motion_stops() {
     for tier in Tier::all() {
         let trace = run(&tier_scenario(tier, 12_000));
         trace.assert_clean();
+        eprintln!(
+            "MEASURE {}: {} of {} cells pending after the quiet phase (the measured residue is {}), {} converged observations",
+            tier.as_str(),
+            trace.counters.pending_cells,
+            trace.counters.cells,
+            tier_residue_cells(tier),
+            trace.counters.converged_observations
+        );
         if tier == Tier::T4 {
             assert!(
                 trace.counters.pending_cells <= 16,
@@ -109,9 +151,10 @@ fn every_tier_converges_after_motion_stops() {
             tier.as_str(),
             trace.counters
         );
+        let residue = tier_residue_cells(tier);
         assert!(
-            trace.counters.pending_cells <= trace.counters.cells / 4,
-            "{}: {} of {} cells still pending",
+            trace.counters.pending_cells <= residue,
+            "{}: {} of {} cells still pending (the measured residue is {residue})",
             tier.as_str(),
             trace.counters.pending_cells,
             trace.counters.cells
@@ -129,11 +172,17 @@ fn echo_p95_matches_the_tier_promise() {
         let Some(p95) = trace.echo_p95_ms() else {
             panic!("{}: no echo was measured", tier.as_str());
         };
-        let budget = (2.0 * LinkProfile::tier(tier).rtt_ms + 250.0).round() as u64;
+        let profile = LinkProfile::tier(tier);
+        let budget = (2.0 * profile.rtt_ms + 250.0).round() as u64;
         // One repair delay and the simulator's tick are the honest allowance:
         // the design repairs a lost echo-critical update instead of
-        // retransmitting it (D-6).
-        let allowance = budget + 3_000 + 10;
+        // retransmitting it (D-6). The repair delay is the tier's own
+        // (MLP spec §9.1), so a LAN is not handed a long-haul link's grace.
+        let allowance = budget + tier_repair_delay_ms(tier, profile.rtt_ms) + SIM_TICK_MS;
+        eprintln!(
+            "MEASURE {}: echo p95 {p95} ms, the promise {budget} ms, the allowance {allowance} ms",
+            tier.as_str()
+        );
         assert!(
             p95 <= allowance,
             "{}: echo p95 {p95} ms above {allowance} ms",
@@ -164,6 +213,32 @@ fn the_cold_start_is_bounded_and_converges() {
             "{}: the cold start never sent bytes",
             tier.as_str()
         );
+        eprintln!(
+            "MEASURE cold-{}: {} of {} cells pending, {} converged observations",
+            tier.as_str(),
+            trace.counters.pending_cells,
+            trace.counters.cells,
+            trace.counters.converged_observations
+        );
+        // The residue the cold start leaves, measured: T2 0, T3 1, T4 1 of 510
+        // cells — the floor ramp drains, it does not strand the surface.
+        assert!(
+            trace.counters.pending_cells <= 1,
+            "{}: {} of {} cells still pending",
+            tier.as_str(),
+            trace.counters.pending_cells,
+            trace.counters.cells
+        );
+        // T2 and T3 converge inside the cold start's 12 s; T4's convergence is
+        // promised at `2 × RTT + 30 s` and is reported, not promised (N-3).
+        if tier != Tier::T4 {
+            assert!(
+                trace.counters.converged_observations > 0,
+                "{}: the cold start never converged ({:?})",
+                tier.as_str(),
+                trace.counters
+            );
+        }
     }
 }
 
@@ -180,17 +255,20 @@ fn the_timeout_arithmetic_holds_for_every_tier() {
         (Tier::T4, 30, 2_000),
     ];
     for (tier, outage_s, rtt_ms) in tiers {
-        // The relay session idle window must outlast the outage with margin.
-        let session_idle = (2 * outage_s + 4 * rtt_ms / 1_000).max(60);
+        // The relay session idle window must outlast the outage with margin:
+        // the rule is `clamp(2 × outage + 4 × RTT, 60 s, 300 s)` (MLP spec
+        // §9.1), and the ceiling may not cut the requirement away.
+        let required_idle = 2 * outage_s + 4 * rtt_ms / 1_000;
+        let session_idle = required_idle.clamp(60, 300);
         assert!(
-            session_idle >= 2 * outage_s + 4 * rtt_ms / 1_000,
-            "{}: idle {session_idle}s",
+            session_idle >= required_idle,
+            "{}: idle {session_idle}s vs the required {required_idle}s",
             tier.as_str()
         );
         // The heartbeat keeps the idle window open without wasting the link.
         let heartbeat = (3 * rtt_ms / 1_000).clamp(2, 30);
         assert!(
-            heartbeat * 4 <= session_idle.max(15),
+            heartbeat * 4 <= session_idle,
             "{}: heartbeat {heartbeat}s vs idle {session_idle}s",
             tier.as_str()
         );
@@ -204,11 +282,17 @@ fn the_timeout_arithmetic_holds_for_every_tier() {
             elapsed += ladder.delay_ms(attempt, 250);
         }
         assert!(
-            park * 1_000 >= outage_s * 1_000 + elapsed.min(60_000),
+            park * 1_000 >= outage_s * 1_000 + elapsed,
             "{}: park {park}s vs outage {outage_s}s and ladder {elapsed}ms",
             tier.as_str()
         );
-        // The repair delay is never shorter than one RTT.
+        // The repair delay is never shorter than one RTT (MLP spec §9.2).
+        let repair_delay = tier_repair_delay_ms(tier, rtt_ms as f64);
+        assert!(
+            repair_delay >= rtt_ms,
+            "{}: the repair delay {repair_delay} ms is shorter than the RTT {rtt_ms} ms",
+            tier.as_str()
+        );
         assert!(rtt_ms >= 10, "every tier's RTT is at least 10 ms");
     }
 }
@@ -275,6 +359,7 @@ fn t4_reports_rather_than_promises_goodput() {
 /// A carrier switch does not change the budget arithmetic.
 #[test]
 fn path_switches_do_not_change_the_budgets() {
+    let mut emitted: Option<(u64, u64)> = None;
     for path in [MediaPath::Ws, MediaPath::DcDirect, MediaPath::DcTurn] {
         let scenario = Scenario::new(format!("path-{}", path.as_str()), Tier::T2)
             .step(Step::PathSwitch(path))
@@ -285,5 +370,39 @@ fn path_switches_do_not_change_the_budgets() {
         let trace = run(&scenario);
         trace.assert_clean();
         assert!(trace.counters.bytes_sent > 0);
+        eprintln!(
+            "MEASURE path-{}: {} updates, {} bytes, {} of {} cells pending, {} converged observations",
+            path.as_str(),
+            trace.counters.updates_sent,
+            trace.counters.bytes_sent,
+            trace.counters.pending_cells,
+            trace.counters.cells,
+            trace.counters.converged_observations
+        );
+        // The switch changes the carrier, not the budgets: the same updates
+        // and the same bytes leave, and the tier converges the same way.
+        let measured = (trace.counters.updates_sent, trace.counters.bytes_sent);
+        match emitted {
+            None => emitted = Some(measured),
+            Some(first) => assert_eq!(
+                measured,
+                first,
+                "{}: the carrier switch changed the budget arithmetic",
+                path.as_str()
+            ),
+        }
+        assert!(
+            trace.counters.converged_observations > 0,
+            "{}: the switched lane never converged ({:?})",
+            path.as_str(),
+            trace.counters
+        );
+        assert!(
+            trace.counters.pending_cells <= tier_residue_cells(Tier::T2),
+            "{}: {} of {} cells still pending",
+            path.as_str(),
+            trace.counters.pending_cells,
+            trace.counters.cells
+        );
     }
 }
