@@ -162,6 +162,22 @@ fn every_tier_converges_after_motion_stops() {
     }
 }
 
+/// The echo p95 each tier actually reaches, plus a margin.
+///
+/// The allowance above is the *policy*: the tier's promise plus the tier's own
+/// repair delay. These numbers are what the tiers reach, and they are the
+/// regression guard: a change that makes the echo slower than this is a
+/// change the tiers' promise no longer covers.
+fn tier_echo_p95_ms(tier: Tier) -> u64 {
+    match tier {
+        Tier::T0 => 40,
+        Tier::T1 => 100,
+        Tier::T2 => 320,
+        Tier::T3 => 3_200,
+        _ => 0,
+    }
+}
+
 /// The tier echo promises: `2 × RTT + 250 ms` as a p95 on T0–T3, measured at
 /// the round trip the sender measured; T4's echo is reported, not promised
 /// (N-3).
@@ -183,14 +199,22 @@ fn echo_p95_matches_the_tier_promise() {
         // retransmitting it (D-6). The repair delay is the tier's own
         // (MLP spec §9.1), so a LAN is not handed a long-haul link's grace.
         let allowance = budget + trace.counters.repair_delay_ms + SIM_TICK_MS;
+        // The measurement itself, with a margin: the tiers' promise is met
+        // with room to spare, and the room is what this asserts.
+        let measured = tier_echo_p95_ms(tier);
         eprintln!(
-            "MEASURE {}: echo p95 {p95} ms, the promise {budget} ms, the allowance {allowance} ms (rtt {rtt_ms:.0} ms, repair {} ms)",
+            "MEASURE {}: echo p95 {p95} ms, the promise {budget} ms, the allowance {allowance} ms, the measured bound {measured} ms (rtt {rtt_ms:.0} ms, repair {} ms)",
             tier.as_str(),
             trace.counters.repair_delay_ms
         );
         assert!(
             p95 <= allowance,
             "{}: echo p95 {p95} ms above {allowance} ms",
+            tier.as_str()
+        );
+        assert!(
+            p95 <= measured,
+            "{}: echo p95 {p95} ms above the measured bound {measured} ms",
             tier.as_str()
         );
         assert!(
