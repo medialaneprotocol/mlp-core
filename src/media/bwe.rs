@@ -155,6 +155,17 @@ pub struct ProbeOutcome {
     pub probe_rate_bps: u64,
 }
 
+/// A probe the sender has put on the wire and is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingProbe {
+    /// The request the estimator asked for.
+    request: ProbeRequest,
+    /// The epoch the probe carries, once the sender stamped it.
+    send_epoch_ms: Option<u64>,
+    /// When the probe went out.
+    sent_at: Option<Instant>,
+}
+
 /// Loss attribution across hops (MLP spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HopAttribution {
@@ -194,6 +205,16 @@ impl InternalState {
             Self::Floor => BweMode::Floor,
         }
     }
+
+    /// Whether a probe may be issued in this state.
+    ///
+    /// A probe is how the sender measures a link the reports do not describe,
+    /// so a *degraded* estimator needs it most: with the probe reserved for
+    /// the steady state, a degraded estimator could never find out that the
+    /// link carries more than it is sending (MLP spec §6.2.6).
+    fn probes(self) -> bool {
+        matches!(self, Self::Steady | Self::Degraded)
+    }
 }
 
 /// The bandwidth estimator (MLP spec §8.2).
@@ -223,12 +244,23 @@ pub struct BandwidthEstimator {
     demand_since: Option<Instant>,
     last_probe_at: Option<Instant>,
     probe_due: bool,
-    probe_pending: Option<ProbeRequest>,
+    probe_pending: Option<PendingProbe>,
     sent_objects: u64,
     sent_bytes: u64,
+    /// Bytes sent since the last report: the window's own traffic.
+    window_sent_bytes: u64,
+    /// Whether the last window was capacity-limited: the sender sent at (or
+    /// above) its own pace, so the window says something about the link.
+    capacity_limited: bool,
     attribution: HopAttribution,
     probes_sent: u64,
     probes_failed: u64,
+    /// Reports compared with the sender's own round-trip measurement.
+    rtt_views_compared: u64,
+    /// Reports whose round trip disagreed with the sender's own.
+    rtt_view_disagreements: u64,
+    /// The largest disagreement between the two views, in ms.
+    rtt_disagreement_ms: f64,
 }
 
 impl BandwidthEstimator {
@@ -265,9 +297,14 @@ impl BandwidthEstimator {
             probe_pending: None,
             sent_objects: 0,
             sent_bytes: 0,
+            window_sent_bytes: 0,
+            capacity_limited: false,
             attribution: HopAttribution::default(),
             probes_sent: 0,
             probes_failed: 0,
+            rtt_views_compared: 0,
+            rtt_view_disagreements: 0,
+            rtt_disagreement_ms: 0.0,
         }
     }
 
@@ -350,6 +387,7 @@ impl BandwidthEstimator {
     pub fn on_send(&mut self, bytes: usize, object_id: u32, _now: Instant) {
         self.sent_objects += 1;
         self.sent_bytes += bytes as u64;
+        self.window_sent_bytes += bytes as u64;
         let _ = object_id;
     }
 
@@ -370,9 +408,13 @@ impl BandwidthEstimator {
         self.last_report_at = Some(now);
         self.no_feedback = false;
 
-        // RTT, rtt_min over the horizon, EWMA and jitter.
-        let rtt_sample = f64::from(feedback.clamped_rtt_ms());
-        self.observe_rtt(rtt_sample, now);
+        // The receiver's report is its own view of the round trip, measured on
+        // the receiver's clock. The estimator's filters — a minimum over a
+        // horizon, an EWMA, and the difference between the two — are only
+        // meaningful when every sample is the same measurement taken on one
+        // clock, so the report is a cross-check and never a sample
+        // (MLP spec §6.2.2).
+        self.cross_check_rtt(feedback);
 
         let goodput = feedback.goodput_bps().map(|value| value as f64);
         if let Some(goodput) = goodput {
@@ -388,6 +430,15 @@ impl BandwidthEstimator {
         self.loss_ratio = loss;
         self.attribution.viewer_lost_objects += feedback.lost_objects;
 
+        // A window in which the sender sent less than its own pace was
+        // application-limited: the link was never asked to carry more, so the
+        // window carries no capacity signal. Only a window that ran at (or
+        // above) the pace may decay the estimate (MLP spec §6.2.3).
+        let window_ms = feedback.window_ms.max(1);
+        let sent_bps = self.window_sent_bytes as f64 * 8_000.0 / window_ms as f64;
+        self.capacity_limited = sent_bps >= 0.9 * self.pace_bps;
+        self.window_sent_bytes = 0;
+
         self.apply_max_filter(goodput);
         self.step_state_machine(goodput, loss);
         self.pace_bps = self
@@ -401,6 +452,36 @@ impl BandwidthEstimator {
     /// sample never carries a loss or goodput signal by itself.
     pub fn on_rtt_sample(&mut self, rtt_ms: f64, now: Instant) {
         self.observe_rtt(rtt_ms.clamp(1.0, 60_000.0), now);
+    }
+
+    /// Compare the receiver's reported round trip with the sender's own
+    /// measurement.
+    ///
+    /// The two ends measure the same path on their own clocks, so they do not
+    /// have to agree exactly — but a large disagreement says the path is not
+    /// the same in both directions, or that one of the two views is stale.
+    /// It is counted, never mixed into the estimator's filters.
+    fn cross_check_rtt(&mut self, feedback: &MediaFeedback) {
+        let reported = f64::from(feedback.rtt_min_ms);
+        if self.rtt_min_ms <= 0.0 || reported <= 0.0 {
+            return;
+        }
+        self.rtt_views_compared += 1;
+        let disagreement = (reported - self.rtt_min_ms).abs();
+        if disagreement > self.jitter_ms.max(1.0) {
+            self.rtt_view_disagreements += 1;
+            self.rtt_disagreement_ms = disagreement;
+        }
+    }
+
+    /// How many reports were compared with the sender's own measurement.
+    pub fn rtt_view_counters(&self) -> (u64, u64) {
+        (self.rtt_views_compared, self.rtt_view_disagreements)
+    }
+
+    /// The largest disagreement between the two views, in ms.
+    pub fn rtt_disagreement_ms(&self) -> f64 {
+        self.rtt_disagreement_ms
     }
 
     fn observe_rtt(&mut self, rtt_sample: f64, now: Instant) {
@@ -446,7 +527,9 @@ impl BandwidthEstimator {
     /// `btlbw` max-filter with decay (MLP spec §8).
     fn apply_max_filter(&mut self, goodput: Option<f64>) {
         let delay_threshold = 50.0f64.max(0.5 * self.rtt_min_ms);
-        if self.loss_ratio > 0.02 || self.queue_delay_ms > delay_threshold {
+        if self.capacity_limited
+            && (self.loss_ratio > 0.02 || self.queue_delay_ms > delay_threshold)
+        {
             self.btlbw_bps *= 0.85;
         }
         if let Some(goodput) = goodput {
@@ -485,12 +568,23 @@ impl BandwidthEstimator {
                 // so persistent benign loss settles instead of marching to the
                 // floor. With no delivery at all the goodput term is nil and
                 // the decay reaches the floor as designed.
-                self.btlbw_bps *= 0.7;
+                //
+                // A window in which the sender sent less than its own pace
+                // was application-limited and carries no capacity signal at
+                // all: the decay waits for a window that ran at the pace.
+                if self.capacity_limited {
+                    self.btlbw_bps *= 0.7;
+                }
                 if let Some(goodput) = goodput {
                     self.btlbw_bps = self.btlbw_bps.max(goodput.min(self.ceiling()));
                 }
                 self.pace_bps = 0.9 * self.btlbw_bps;
-                let healthy = loss < 0.01 && self.queue_delay_ms < 0.5 * self.rtt_min_ms;
+                // The delay signal exists only where a round trip was
+                // measured: no measurement means no queue delay, and a link
+                // that reports no delay is healthy.
+                let delay_ok =
+                    self.queue_delay_ms == 0.0 || self.queue_delay_ms < 0.5 * self.rtt_min_ms;
+                let healthy = loss < 0.01 && delay_ok;
                 if healthy {
                     self.healthy_reports += 1;
                 } else {
@@ -537,7 +631,23 @@ impl BandwidthEstimator {
         {
             self.no_feedback = true;
         }
-        if self.state == InternalState::Steady && !self.no_feedback {
+        // A probe whose echo did not come back in time is a lost probe: the
+        // link did not carry it, and the estimate says so.
+        if let Some(deadline) = self.probe_deadline()
+            && now >= deadline
+        {
+            let rate = self
+                .probe_pending
+                .map(|pending| pending.request.rate_bps)
+                .unwrap_or_default();
+            let outcome = ProbeOutcome {
+                delivered: false,
+                delivered_ratio: 0.0,
+                probe_rate_bps: rate,
+            };
+            self.on_probe_result(&outcome, now);
+        }
+        if self.state.probes() && !self.no_feedback {
             // Demand must persist for `max(3 × rtt_min, 1 s)` and a probe may
             // not be re-armed faster than that window: a probe flood would
             // itself be the traffic problem the estimator exists to prevent.
@@ -563,7 +673,7 @@ impl BandwidthEstimator {
     /// Ask whether a probe must be emitted now (MLP spec §8).
     pub fn probe_due(&mut self, now: Instant) -> Option<ProbeRequest> {
         self.on_timeout(now);
-        if !self.probe_due || self.no_feedback || self.state != InternalState::Steady {
+        if !self.probe_due || self.no_feedback || !self.state.probes() {
             return None;
         }
         let payload_bytes = (0.25 * self.pace_bps / 8.0) as u32;
@@ -575,7 +685,11 @@ impl BandwidthEstimator {
         };
         self.probe_due = false;
         self.last_probe_at = Some(now);
-        self.probe_pending = Some(request);
+        self.probe_pending = Some(PendingProbe {
+            request,
+            send_epoch_ms: None,
+            sent_at: Some(now),
+        });
         self.probes_sent += 1;
         Some(request)
     }
@@ -592,17 +706,53 @@ impl BandwidthEstimator {
         }
     }
 
+    /// Note that the sender put a probe on the wire.
+    ///
+    /// The epoch is the one the probe carries (`SEND_EPOCH_MS`): the echo that
+    /// comes back quotes it, and that is how the estimator tells the probe's
+    /// own echo from any other echo on the lane.
+    pub fn note_probe_sent(&mut self, send_epoch_ms: u64, now: Instant) {
+        if let Some(pending) = self.probe_pending.as_mut() {
+            pending.send_epoch_ms = Some(send_epoch_ms);
+            pending.sent_at = Some(now);
+        }
+    }
+
+    /// The deadline a probe's echo must answer within: the echo promise
+    /// `2 × RTT + 250 ms` (MLP spec §9.1), measured on the sender's own clock.
+    ///
+    /// A probe sent before the first round-trip measurement has no deadline:
+    /// that probe's answer *is* the measurement, and a link that has never
+    /// answered anything is the no-feedback case, not a lost probe.
+    fn probe_deadline(&self) -> Option<Instant> {
+        let pending = self.probe_pending.as_ref()?;
+        let sent_at = pending.sent_at?;
+        if self.rtt_ewma_ms <= 0.0 {
+            return None;
+        }
+        let budget = Duration::from_secs_f64((2.0 * self.rtt_ewma_ms + 250.0) / 1_000.0);
+        Some(sent_at + budget)
+    }
+
     /// Feed a probe echo received from the peer (the peer echoes our probe).
-    pub fn on_probe_echo(&mut self, echo: &ProbeEcho, _now: Instant) {
-        let batch = self.probe_pending.as_ref().map(|request| ProbeOutcome {
+    ///
+    /// The echo that quotes the pending probe's epoch is that probe's answer:
+    /// the probe was delivered, and the link carried it at the rate the probe
+    /// was sent at.
+    pub fn on_probe_echo(&mut self, echo: &ProbeEcho, now: Instant) {
+        let pending = self.probe_pending.as_ref();
+        let Some(pending) = pending else {
+            return;
+        };
+        if pending.send_epoch_ms != Some(echo.send_epoch_ms) {
+            return;
+        }
+        let outcome = ProbeOutcome {
             delivered: true,
             delivered_ratio: 1.0,
-            probe_rate_bps: request.rate_bps,
-        });
-        if let Some(outcome) = batch {
-            self.on_probe_result(&outcome, _now);
-        }
-        let _ = echo;
+            probe_rate_bps: pending.request.rate_bps,
+        };
+        self.on_probe_result(&outcome, now);
     }
 
     /// Attribution of loss across hops (MLP spec §8).
@@ -802,6 +952,13 @@ mod tests {
         }
     }
 
+    /// A window in which the sender sent at its own pace: the window carries
+    /// a capacity signal, so a loss or a queue delay may decay the estimate.
+    fn sent_at_pace(estimator: &mut BandwidthEstimator, window_ms: u64, now: Instant) {
+        let bytes = (estimator.pace_bps() / 8) as usize * (window_ms as usize / 1_000);
+        estimator.on_send(bytes.max(1), 1, now);
+    }
+
     #[test]
     fn startup_doubles_then_settles_at_ninety_percent_of_btlbw() {
         let now = Instant::now();
@@ -827,13 +984,30 @@ mod tests {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         for _ in 0..4 {
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
         }
         let steady = estimator.pace_bps();
         assert_eq!(estimator.mode(), BweMode::Steady);
+        sent_at_pace(&mut estimator, 1_000, now);
         estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
         assert_eq!(estimator.mode(), BweMode::Degraded);
         assert!(estimator.pace_bps() < steady);
+    }
+
+    #[test]
+    fn a_window_the_sender_did_not_fill_carries_no_capacity_signal() {
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        for _ in 0..4 {
+            sent_at_pace(&mut estimator, 1_000, now);
+            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
+        }
+        let steady = estimator.pace_bps();
+        // The same loss, in a window the sender did not fill: the estimate
+        // stands, because the link was never asked to carry more.
+        estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
+        assert_eq!(estimator.pace_bps(), steady, "the estimate stands");
     }
 
     #[test]
@@ -841,11 +1015,14 @@ mod tests {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         for _ in 0..4 {
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
         }
+        sent_at_pace(&mut estimator, 1_000, now);
         estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
         assert_eq!(estimator.mode(), BweMode::Degraded);
         for _ in 0..3 {
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(&feedback(10, 50_000, 100, 0, 1_000), now);
         }
         assert_eq!(estimator.mode(), BweMode::StartUp);
@@ -855,12 +1032,16 @@ mod tests {
     fn queue_delay_above_one_rtt_degrades() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.on_rtt_sample(10.0, now);
         for _ in 0..4 {
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
         }
         assert_eq!(estimator.mode(), BweMode::Steady);
         // rtt_min stays 10 ms while rtt_ewma climbs: queue delay > 1 × rtt_min.
         for _ in 0..24 {
+            estimator.on_rtt_sample(500.0, now);
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(&feedback(500, 100_000, 100, 0, 1_000), now);
         }
         assert!(
@@ -1069,18 +1250,36 @@ mod tests {
         let now = Instant::now();
         // The interval follows the 60 s rtt minimum, so each case gets its own
         // estimator: the minimum is a horizon statistic, not the last sample.
+        // The samples are the sender's own round trips, measured from the
+        // probe echoes.
         let mut short = BandwidthEstimator::new(BweConfig::default());
-        short.on_feedback(&feedback(10, 100, 1, 0, 1_000), now);
+        short.on_rtt_sample(10.0, now);
         assert_eq!(short.report_interval(), Duration::from_millis(250));
         let mut long = BandwidthEstimator::new(BweConfig::default());
-        long.on_feedback(&feedback(2_000, 100, 1, 0, 1_000), now);
+        long.on_rtt_sample(2_000.0, now);
         assert_eq!(long.report_interval(), Duration::from_millis(2_000));
         let mut mid = BandwidthEstimator::new(BweConfig::default());
-        mid.on_feedback(&feedback(100, 100, 1, 0, 1_000), now);
+        mid.on_rtt_sample(100.0, now);
         assert_eq!(mid.report_interval(), Duration::from_millis(400));
         // A later high sample does not raise it above the horizon minimum's.
-        mid.on_feedback(&feedback(500, 100, 1, 0, 1_000), now);
+        mid.on_rtt_sample(500.0, now);
         assert_eq!(mid.report_interval(), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn a_reports_round_trip_is_a_cross_check_and_not_a_sample() {
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.on_rtt_sample(120.0, now);
+        estimator.on_feedback(&feedback(1, 100, 1, 0, 1_000), now);
+        assert_eq!(
+            estimator.rtt_min_ms(),
+            120.0,
+            "the report does not lower the sender's own measurement"
+        );
+        let (compared, disagreements) = estimator.rtt_view_counters();
+        assert_eq!(compared, 1);
+        assert_eq!(disagreements, 1, "the two views disagree");
     }
 
     #[test]

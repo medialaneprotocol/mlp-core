@@ -35,6 +35,13 @@ use super::{
     MediaPath, MediaProbe, ProbeEcho,
 };
 
+/// How many outstanding echo obligations a sender keeps.
+///
+/// An obligation is one object awaiting an echo. The queue is bounded: an
+/// echo that never comes is a lost measurement, not a debt the sender has to
+/// carry for the life of the session.
+pub const MAX_PENDING_ECHOES: usize = 64;
+
 /// What the driver must do in response to a sender decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MediaSenderEvent {
@@ -138,6 +145,10 @@ pub struct SenderStats {
     pub probes_sent: u64,
     /// Probe echoes turned into RTT samples.
     pub probe_echoes: u64,
+    /// Echoes that answered no outstanding obligation.
+    pub echo_orphans: u64,
+    /// Outstanding echo obligations dropped because the queue was full.
+    pub echo_obligations_dropped: u64,
     /// Cursor objects coalesced by the latest-wins slot.
     pub cursors_coalesced: u64,
     /// Idle updates emitted.
@@ -658,7 +669,8 @@ pub struct MediaSenderMachine {
     started: Instant,
     cursor_slot: Option<usize>,
     stats: SenderStats,
-    pending_echoes: Vec<(u32, u64)>,
+    /// The epochs of the objects awaiting an echo.
+    pending_echoes: Vec<u64>,
     pending_plan_reasons: Vec<PlanStartReason>,
     last_estimate: Estimate,
     policy: MediaLanePolicy,
@@ -730,6 +742,28 @@ impl MediaSenderMachine {
     /// The estimator.
     pub fn estimator(&self) -> &BandwidthEstimator {
         &self.estimator
+    }
+
+    /// The largest payload one fragment may carry on this lane's carrier.
+    ///
+    /// A driver that encodes an update needs it: the update is fragmented by
+    /// the carrier's cap, not by the link's.
+    pub fn fragment_payload_max(&self) -> usize {
+        self.config.fragment_payload_max
+    }
+
+    /// The largest payload one update part may carry.
+    ///
+    /// It is the estimator's object cap, and on a datagram carrier the
+    /// carrier's fragment cap as well: an update is fragmented by the
+    /// carrier, so a part larger than its cap can never leave.
+    pub fn max_update_part_bytes(&self) -> usize {
+        let estimate_cap = self.last_estimate.max_object_bytes as usize;
+        if self.config.carrier.is_datagram() {
+            estimate_cap.min(self.config.fragment_payload_max)
+        } else {
+            estimate_cap
+        }
     }
 
     /// The estimator, mutable.
@@ -947,7 +981,7 @@ impl MediaSenderMachine {
                 duplicated: false,
             });
             if update.echo_critical {
-                self.pending_echoes.push((object_id, session_ms));
+                self.remember_echo(session_ms);
             }
         }
         let _ = first_object_id;
@@ -1120,6 +1154,12 @@ impl MediaSenderMachine {
     }
 
     /// Enqueue a `MediaProbe` with `ECHO_REQUESTED` set.
+    ///
+    /// The probe carries `SEND_EPOCH_MS`: the sender's session-relative ms at
+    /// emission. The peer preserves that epoch verbatim in its echo, so the
+    /// round trip is a subtraction on the sender's own clock
+    /// (MLP spec §6.2.6) — no wall clock, and no assumption that the two
+    /// ends' session clocks agree.
     pub fn enqueue_probe(
         &mut self,
         probe: &MediaProbe,
@@ -1128,17 +1168,28 @@ impl MediaSenderMachine {
     ) -> EnqueueOutcome {
         let mut flags = FragmentFlags::PROBE;
         flags = flags.union(FragmentFlags::ECHO_REQUESTED);
+        // The body's epoch is the sender's own claim of when the probe left,
+        // and the extension mirrors it so that every peer echoes the same
+        // number back. A driver that did not stamp the body gets the
+        // machine's own clock.
+        let send_epoch_ms = match probe.send_epoch_ms {
+            0 => self.session_ms(now),
+            epoch => epoch,
+        };
+        let mut ext = HeaderExt::new();
+        let _ = ext.push_u64(tlv::SEND_EPOCH_MS, send_epoch_ms);
         let outcome = self.enqueue_simple(
             FragmentClass::Feedback,
             TrafficClass::Feedback,
             Priority::REPORT,
             flags,
-            HeaderExt::new(),
+            ext,
             payload,
             now,
         );
-        if let EnqueueOutcome::Accepted { object_id, .. } = outcome {
-            self.pending_echoes.push((object_id, probe.send_epoch_ms));
+        if let EnqueueOutcome::Accepted { .. } = outcome {
+            self.remember_echo(send_epoch_ms);
+            self.estimator.note_probe_sent(send_epoch_ms, now);
             self.stats.probes_sent += 1;
         }
         outcome
@@ -1263,16 +1314,46 @@ impl MediaSenderMachine {
         self.estimator.on_hop_report(&report, now);
     }
 
-    /// Feed one probe echo; the RTT is `echo_epoch_ms − send_epoch_ms`.
+    /// Feed one probe echo; the round trip is measured on the sender's own
+    /// clock as `now − SEND_EPOCH_MS` (MLP spec §6.2.6).
+    ///
+    /// The echo answers an object the sender sent with `ECHO_REQUESTED`: the
+    /// epoch it carries is the one the sender stamped on that object, and the
+    /// peer preserves it verbatim. An echo that answers no outstanding
+    /// obligation — a stale one, or one for an object this sender never sent
+    /// — is counted and is not a measurement.
     pub fn on_probe_echo(&mut self, echo: ProbeEcho, now: Instant) -> Vec<MediaSenderEvent> {
         self.stats.probe_echoes += 1;
-        if echo.echo_epoch_ms > echo.send_epoch_ms {
-            let rtt_ms = (echo.echo_epoch_ms - echo.send_epoch_ms) as f64;
+        let Some(index) = self
+            .pending_echoes
+            .iter()
+            .position(|epoch| *epoch == echo.send_epoch_ms)
+        else {
+            self.stats.echo_orphans += 1;
+            return Vec::new();
+        };
+        let send_epoch_ms = self.pending_echoes.remove(index);
+        let now_ms = self.session_ms(now);
+        if now_ms > send_epoch_ms {
+            let rtt_ms = (now_ms - send_epoch_ms) as f64;
             self.estimator.on_rtt_sample(rtt_ms, now);
         }
-        self.pending_echoes
-            .retain(|(object_id, _)| *object_id != echo.object_id);
+        self.estimator.on_probe_echo(&echo, now);
         Vec::new()
+    }
+
+    /// Record an outstanding echo obligation: the epoch an object awaiting an
+    /// echo carries.
+    ///
+    /// The queue is bounded: an obligation whose echo never came is a lost
+    /// measurement, not a debt, and the oldest obligation is dropped once the
+    /// queue is full.
+    fn remember_echo(&mut self, send_epoch_ms: u64) {
+        self.pending_echoes.push(send_epoch_ms);
+        while self.pending_echoes.len() > MAX_PENDING_ECHOES {
+            self.pending_echoes.remove(0);
+            self.stats.echo_obligations_dropped += 1;
+        }
     }
 
     /// Feed an inbound control close from the peer.
@@ -1847,7 +1928,14 @@ impl MediaSenderMachine {
         let object_id = self.alloc_object_id();
         let mut ext = HeaderExt::new();
         let _ = ext.push_u32(tlv::ECHO_OF_OBJECT_ID, echo_of);
-        let _ = ext.push_u64(tlv::SEND_EPOCH_MS, self.session_ms(now));
+        // The epoch is preserved verbatim on a retransmission (MLP spec §4.3):
+        // the duplicate is the same object sent again, so the echo it draws
+        // measures the round trip of the *original* emission.
+        let send_epoch_ms = source
+            .ext
+            .send_epoch_ms()
+            .unwrap_or_else(|| self.session_ms(now));
+        let _ = ext.push_u64(tlv::SEND_EPOCH_MS, send_epoch_ms);
         let flags = source
             .flags
             .union(FragmentFlags::DUP)
@@ -2029,6 +2117,87 @@ mod tests {
     fn sender(carrier: Carrier) -> MediaSenderMachine {
         let grid = CellGrid::with_cell_size(320, 240, 64);
         MediaSenderMachine::new(MediaSenderConfig::new(carrier, grid), grid, Instant::now())
+    }
+
+    fn sender_at(carrier: Carrier, now: Instant) -> MediaSenderMachine {
+        let grid = CellGrid::with_cell_size(320, 240, 64);
+        MediaSenderMachine::new(MediaSenderConfig::new(carrier, grid), grid, now)
+    }
+
+    #[test]
+    fn a_probe_carries_the_epoch_it_left_at() {
+        let now = Instant::now();
+        let mut sender = sender(Carrier::Ws);
+        let probe = MediaProbe {
+            probe_id: 7,
+            payload_bytes: 100,
+            send_epoch_ms: sender.session_ms(now),
+        };
+        assert!(matches!(
+            sender.enqueue_probe(&probe, vec![0u8; 100], now),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let fragment = sender.poll_fragment(now).expect("the probe leaves");
+        let mut parsed = crate::media::pdu::parse_message(&fragment.bytes, Carrier::Ws)
+            .expect("the fragment parses");
+        let parsed = parsed.remove(0);
+        assert_eq!(
+            parsed.ext.send_epoch_ms(),
+            Some(sender.session_ms(now)),
+            "the probe carries the epoch it left at"
+        );
+        assert!(parsed.header.flags.contains(FragmentFlags::ECHO_REQUESTED));
+    }
+
+    #[test]
+    fn the_probe_echo_measures_the_round_trip_on_the_senders_own_clock() {
+        let now = Instant::now();
+        let mut sender = sender_at(Carrier::Ws, now);
+        let epoch = sender.session_ms(now);
+        let probe = MediaProbe {
+            probe_id: 7,
+            payload_bytes: 100,
+            send_epoch_ms: epoch,
+        };
+        assert!(matches!(
+            sender.enqueue_probe(&probe, vec![0u8; 100], now),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        // The echo comes back 40 ms later, quoting the epoch the probe left
+        // at: the round trip is 40 ms, not the session's own age.
+        let later = now + Duration::from_millis(40);
+        sender.on_probe_echo(
+            ProbeEcho {
+                object_id: 1,
+                send_epoch_ms: epoch,
+                echo_epoch_ms: epoch + 40,
+                payload_bytes: 100,
+            },
+            later,
+        );
+        assert!(
+            (sender.estimator().rtt_ms() - 40.0).abs() < 1.0,
+            "rtt {}",
+            sender.estimator().rtt_ms()
+        );
+        assert_eq!(sender.stats().echo_orphans, 0);
+    }
+
+    #[test]
+    fn an_echo_that_answers_no_probe_is_not_a_measurement() {
+        let now = Instant::now();
+        let mut sender = sender(Carrier::Ws);
+        sender.on_probe_echo(
+            ProbeEcho {
+                object_id: 99,
+                send_epoch_ms: 4_242,
+                echo_epoch_ms: 4_292,
+                payload_bytes: 0,
+            },
+            now,
+        );
+        assert_eq!(sender.estimator().rtt_ms(), 0.0, "no measurement");
+        assert_eq!(sender.stats().echo_orphans, 1);
     }
 
     #[test]

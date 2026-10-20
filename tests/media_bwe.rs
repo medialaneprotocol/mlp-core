@@ -29,6 +29,18 @@ fn lossy(rtt_ms: u32, goodput_bps: u64, loss: f64) -> MediaFeedback {
     feedback(rtt_ms, bytes, 100, lost, 1_000)
 }
 
+/// The sender's own round trip, as a probe echo measures it.
+fn round_trip(estimator: &mut BandwidthEstimator, rtt_ms: f64, now: Instant) {
+    estimator.on_rtt_sample(rtt_ms, now);
+}
+
+/// A window in which the sender sent at its own pace: the window carries a
+/// capacity signal, so a loss or a queue delay may decay the estimate.
+fn sent_at_pace(estimator: &mut BandwidthEstimator, window_ms: u64, now: Instant) {
+    let bytes = (estimator.pace_bps() / 8) as usize * (window_ms as usize / 1_000);
+    estimator.on_send(bytes.max(1), 1, now);
+}
+
 #[test]
 fn startup_doubles_per_report_then_settles() {
     let now = Instant::now();
@@ -61,20 +73,24 @@ fn loss_above_two_percent_decays_btlbw_and_five_percent_degrades() {
     let btlbw = estimator.btlbw_bps();
     // 3 % loss at the same goodput: the decay is re-raised by the window's
     // goodput, so btlbw holds instead of growing, and the mode stays Steady.
+    sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 2_000_000, 0.03), now);
     assert!(estimator.btlbw_bps() <= btlbw);
     assert_eq!(estimator.mode(), BweMode::Steady);
     assert!(estimator.pace_bps() <= steady);
     // When the loss has actually cost throughput, btlbw decays.
+    sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 1_500_000, 0.03), now);
     assert!(
         estimator.btlbw_bps() < btlbw,
         "decay applies to the lower goodput"
     );
     // 10 % loss: Degraded, and the pace steps down by 30 % per report.
+    sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 1_000_000, 0.10), now);
     assert_eq!(estimator.mode(), BweMode::Degraded);
     let degraded = estimator.pace_bps();
+    sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 1_000_000, 0.10), now);
     assert!(estimator.pace_bps() <= (degraded as f64 * 0.71) as u64 + 1);
 }
@@ -86,12 +102,14 @@ fn three_healthy_reports_climb_back_out_of_degraded() {
     for _ in 0..4 {
         estimator.on_feedback(&healthy(50, 2_000_000), now);
     }
+    sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 1_000_000, 0.20), now);
     assert!(matches!(
         estimator.mode(),
         BweMode::Degraded | BweMode::Floor
     ));
     for _ in 0..3 {
+        sent_at_pace(&mut estimator, 1_000, now);
         estimator.on_feedback(&healthy(50, 1_000_000), now);
     }
     assert_eq!(estimator.mode(), BweMode::StartUp);
@@ -132,6 +150,7 @@ fn the_floor_is_never_crossed() {
 fn no_feedback_uses_the_emergency_profile_and_one_report_clears_it() {
     let now = Instant::now();
     let mut estimator = BandwidthEstimator::new(BweConfig::default());
+    round_trip(&mut estimator, 400.0, now);
     estimator.on_feedback(&healthy(400, 256_000), now);
     let grace = estimator.no_feedback_grace();
     assert_eq!(grace, Duration::from_millis(3 * 1_600 + 2_000));
@@ -338,8 +357,8 @@ fn rtt_samples_from_probes_and_hop_reports_do_not_carry_loss() {
     }
     let loss = estimator.loss_ratio();
     estimator.on_rtt_sample(400.0, now);
-    assert!((estimator.rtt_ms() - 137.5).abs() < 1.0, "EWMA α = 1/8");
-    assert!(estimator.rtt_min_ms() <= 100.0);
+    assert!((estimator.rtt_ms() - 400.0).abs() < 1.0, "the first sample");
+    assert!(estimator.rtt_min_ms() <= 400.0);
     assert_eq!(
         estimator.loss_ratio(),
         loss,
@@ -372,6 +391,7 @@ fn every_rule_holds_at_ten_fifteen_four_hundred_and_two_thousand_ms_rtt() {
             _ => 32_000,
         };
         for _ in 0..6 {
+            round_trip(&mut estimator, f64::from(rtt_ms), now);
             estimator.on_feedback(&healthy(rtt_ms, goodput), now);
         }
         let estimate = estimator.estimate();

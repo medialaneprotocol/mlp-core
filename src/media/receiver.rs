@@ -26,6 +26,8 @@ pub const REPORT_INTERVAL_CEILING_MS: u64 = 2_000;
 pub const REPORT_INTERVAL_FACTOR: f64 = 4.0;
 /// How many applied `(update_id, part_index)` pairs are remembered.
 pub const APPLIED_CHUNK_WINDOW: usize = 512;
+/// How many outstanding probes a receiver keeps.
+pub const MAX_PENDING_PROBES: usize = 8;
 
 /// Receiver configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +116,10 @@ pub struct ReceiverStats {
     pub probes_sent: u64,
     /// Echoes received for our own probes.
     pub probe_echoes: u64,
+    /// Echoes that quoted no probe of ours.
+    pub probe_echo_orphans: u64,
+    /// Probes dropped because their echo never came.
+    pub probes_expired: u64,
     /// Feedback reports built.
     pub feedback_reports: u64,
     /// Updates the driver reported as applied.
@@ -424,6 +430,12 @@ impl MediaReceiverMachine {
             self.next_probe_id = self.next_probe_id.wrapping_add(1).max(1);
             self.pending_probes
                 .push_back((probe.probe_id, probe.send_epoch_ms));
+            // The queue is bounded: a probe whose echo never came is a lost
+            // measurement, not a debt the receiver carries for the session.
+            while self.pending_probes.len() > MAX_PENDING_PROBES {
+                self.pending_probes.pop_front();
+                self.stats.probes_expired += 1;
+            }
             self.last_probe = Some(now);
             self.stats.probes_sent += 1;
             events.push(MediaReceiveEvent::ProbeDue(probe));
@@ -455,14 +467,24 @@ impl MediaReceiverMachine {
     }
 
     /// Answer an echo for one of our probes.
-    pub fn on_probe_echo(&mut self, echo: ProbeEcho, _now: Instant) {
+    ///
+    /// The echo quotes the epoch our probe carried (`SEND_EPOCH_MS`), and the
+    /// round trip is measured on our own clock: the echo's arrival minus the
+    /// epoch we stamped on the probe (MLP spec §6.2.6). An echo that quotes no
+    /// probe of ours is not a measurement.
+    pub fn on_probe_echo(&mut self, echo: ProbeEcho, now: Instant) {
         self.stats.probe_echoes += 1;
-        if echo.echo_epoch_ms > echo.send_epoch_ms {
-            let sample = (echo.echo_epoch_ms - echo.send_epoch_ms) as f64;
-            self.observe_rtt(sample);
+        let Some(index) = self.pending_probes.iter().position(|(probe_id, epoch)| {
+            *probe_id == echo.object_id || *epoch == echo.send_epoch_ms
+        }) else {
+            self.stats.probe_echo_orphans += 1;
+            return;
+        };
+        self.pending_probes.remove(index);
+        let now_ms = self.session_ms(now);
+        if now_ms > echo.send_epoch_ms {
+            self.observe_rtt((now_ms - echo.send_epoch_ms) as f64);
         }
-        self.pending_probes
-            .retain(|(probe_id, _)| *probe_id != echo.object_id);
     }
 
     /// Feed an RTT sample measured elsewhere (for example by a hop).
@@ -627,7 +649,15 @@ impl MediaReceiverMachine {
                 }
             }
         }
-        self.expected_object_id = Some(object_id.saturating_add(1));
+        // The expectation only ever moves forward: a lane's writer drains
+        // strictly by priority (D-3), so an object may overtake an older one
+        // on the wire. An overtaken object is reordered, never a gap — and a
+        // reordered object must not lower the expectation, or every later
+        // object would look like a lost one (MLP spec §6.2.2).
+        self.expected_object_id = Some(match self.expected_object_id {
+            Some(expected) if expected > object_id => expected,
+            _ => object_id.saturating_add(1),
+        });
     }
 
     fn observe_rtt(&mut self, sample: f64) {
@@ -895,7 +925,7 @@ mod tests {
     #[test]
     fn probe_cadence_and_echo_rtt() {
         let now = Instant::now();
-        let mut receiver = receiver(Carrier::Ws);
+        let mut receiver = receiver_at(Carrier::Ws, now);
         let events = receiver.tick(now);
         let probe = events
             .iter()
@@ -904,6 +934,8 @@ mod tests {
                 _ => None,
             })
             .expect("first probe");
+        // The echo answers 150 ms later: the round trip is measured on the
+        // receiver's own clock, from the probe's epoch to the echo's arrival.
         receiver.on_probe_echo(
             ProbeEcho {
                 object_id: probe.probe_id,
@@ -911,11 +943,30 @@ mod tests {
                 echo_epoch_ms: probe.send_epoch_ms + 150,
                 payload_bytes: probe.payload_bytes,
             },
-            now,
+            now + Duration::from_millis(150),
         );
         assert!((receiver.rtt_ms() - 150.0).abs() < 1.0);
         assert_eq!(receiver.stats().probe_echoes, 1);
         assert_eq!(receiver.report_interval(), Duration::from_millis(600));
+    }
+
+    #[test]
+    fn an_echo_that_quotes_no_probe_of_ours_is_not_a_measurement() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        let _ = receiver.tick(now);
+        receiver.on_probe_echo(
+            ProbeEcho {
+                object_id: 999,
+                send_epoch_ms: 4_242,
+                echo_epoch_ms: 4_392,
+                payload_bytes: 0,
+            },
+            now + Duration::from_millis(150),
+        );
+        assert_eq!(receiver.rtt_ms(), 0.0, "no measurement was taken");
+        assert_eq!(receiver.stats().probe_echoes, 1);
+        assert_eq!(receiver.stats().probe_echo_orphans, 1);
     }
 
     #[test]

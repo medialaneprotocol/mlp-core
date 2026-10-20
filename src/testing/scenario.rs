@@ -326,6 +326,22 @@ pub struct TraceCounters {
     pub cells: u32,
     /// The simulated epoch at the end.
     pub epoch: u32,
+    /// The sender's smoothed round-trip time at the end, in ms.
+    pub rtt_ewma_ms: f64,
+    /// The sender's round-trip minimum over the horizon, in ms.
+    pub rtt_min_ms: f64,
+    /// The sender's pace at the end, in bits per second.
+    pub pace_bps: u64,
+    /// The accounting's repair delay at the end, in ms.
+    pub repair_delay_ms: u64,
+    /// The sender's own round trips measured from the probe echoes.
+    pub rtt_samples: u64,
+    /// Probes the sender put on the wire.
+    pub probes_sent: u64,
+    /// Probes whose echo never came back.
+    pub probes_failed: u64,
+    /// Echoes that answered no outstanding obligation.
+    pub echo_orphans: u64,
 }
 
 /// The deterministic trace of a run.
@@ -472,7 +488,6 @@ struct Sim {
     trace: Trace,
     path: MediaPath,
     fragment_releases: Vec<(u64, u64)>,
-    pending_host_probes: Vec<(u32, u64)>,
     last_change_ms: u64,
     release_cap_bytes: u64,
 }
@@ -571,6 +586,14 @@ impl Sim {
                 final_state: String::new(),
                 cells: grid.cells(),
                 epoch: 0,
+                rtt_ewma_ms: 0.0,
+                rtt_min_ms: 0.0,
+                pace_bps: 0,
+                repair_delay_ms: 0,
+                rtt_samples: 0,
+                probes_sent: 0,
+                probes_failed: 0,
+                echo_orphans: 0,
             },
             link: *LossyLink::new(profile_for_stats.clone()).stats(),
         };
@@ -614,7 +637,6 @@ impl Sim {
             trace,
             path: MediaPath::Ws,
             fragment_releases: Vec::new(),
-            pending_host_probes: Vec::new(),
             last_change_ms: 0,
             release_cap_bytes: 0,
         }
@@ -671,12 +693,35 @@ impl Sim {
         for delivery in deliveries {
             self.deliver(delivery);
         }
+        self.viewer_timers();
         self.viewer_feedback();
         self.host_timers();
         let now = self.instant();
         self.report_demand(now);
-        self.expire_probes(now);
+        self.count_lost_probes();
         self.check_cheap_invariants();
+    }
+
+    /// The receiver's own timers: its assembly deadlines, its report cadence
+    /// and its probe.
+    ///
+    /// The receiver measures the round trip with its own probe and reports it
+    /// (MLP spec §6.2.6): without that measurement its report carries no
+    /// round trip at all.
+    fn viewer_timers(&mut self) {
+        let now = self.instant();
+        let events = self.receiver.tick(now);
+        for event in events {
+            match event {
+                MediaReceiveEvent::ProbeDue(probe) => {
+                    let payload = encode_probe(&probe);
+                    let message = self.wrap_message(FragmentClass::Feedback, payload, None);
+                    self.link.transmit(Endpoint::Receiver, message);
+                }
+                MediaReceiveEvent::FeedbackDue => {}
+                _ => {}
+            }
+        }
     }
 
     // ── sender side ───────────────────────────────────────────────────────────
@@ -829,38 +874,18 @@ impl Sim {
     fn send_probe(&mut self, probe: crate::media::MediaProbe) {
         let payload = encode_probe(&probe);
         let now = self.instant();
-        if let EnqueueOutcome::Accepted { object_id, .. } =
-            self.sender.enqueue_probe(&probe, payload, now)
-        {
-            self.pending_host_probes.push((object_id, self.now_ms));
-        }
+        self.sender.enqueue_probe(&probe, payload, now);
     }
 
     /// Fail probes whose echo never came back (MLP spec §8).
-    fn expire_probes(&mut self, now: Instant) {
-        let deadline = (2.0 * self.link.profile().rtt_ms + 250.0).round() as u64;
-        let mut expired = Vec::new();
-        let mut remaining = Vec::new();
-        for (probe_id, sent_at) in self.pending_host_probes.drain(..) {
-            if self.now_ms.saturating_sub(sent_at) >= deadline {
-                expired.push(probe_id);
-            } else {
-                remaining.push((probe_id, sent_at));
-            }
-        }
-        self.pending_host_probes = remaining;
-        let btlbw = self.sender.estimator().btlbw_bps();
-        for _ in expired {
-            self.sender.estimator_mut().on_probe_result(
-                &crate::media::bwe::ProbeOutcome {
-                    delivered: false,
-                    delivered_ratio: 0.0,
-                    probe_rate_bps: btlbw,
-                },
-                now,
-            );
-            self.trace.counters.probes_lost += 1;
-        }
+    /// The probes whose echo never came back.
+    ///
+    /// The sender owns its probe's lifetime: it knows the round trip it
+    /// measured, and a probe that did not come back in time is a lost probe
+    /// (MLP spec §6.2.6).
+    fn count_lost_probes(&mut self) {
+        let (_, failed) = self.sender.estimator().probe_counters();
+        self.trace.counters.probes_lost = failed;
     }
 
     fn record_update(&mut self, update_id: u64, kind: &str, cells: u32, bytes: u32) {
@@ -891,12 +916,10 @@ impl Sim {
         }
         // Pad to a plausible payload size, never above the object cap: on a
         // datagram carrier that cap is the fragment payload budget (MLP spec annex D, D-19).
-        let estimate_cap = self.sender.estimate().max_object_bytes as usize;
-        let cap = if self.link.profile().mtu_bytes <= 1_150 {
-            estimate_cap.min(self.link.profile().mtu_bytes as usize)
-        } else {
-            estimate_cap
-        };
+        // The budget is the *carrier's*: the update is fragmented by the
+        // carrier the lane writes on, which a link profile change does not
+        // change.
+        let cap = self.sender.max_update_part_bytes();
         let target = payload_len(decision).clamp(SIM_BITMAP_BYTES, cap.max(SIM_BITMAP_BYTES));
         payload.resize(target, 0);
         payload
@@ -1029,6 +1052,12 @@ impl Sim {
             match event {
                 MediaReceiveEvent::Object(object) => {
                     self.trace.counters.objects_delivered += 1;
+                    // The peer's answer to one of our probes is the round trip
+                    // we measure (MLP spec §6.2.6).
+                    if let Some(echo) = decode_echo(&object.payload) {
+                        self.receiver.on_probe_echo(echo, now);
+                        continue;
+                    }
                     if object.class != FragmentClass::Media {
                         continue;
                     }
@@ -1235,6 +1264,9 @@ impl Sim {
                     self.note_sender_events(&events);
                 } else if let Some(probe) = decode_probe(&object.payload) {
                     // The sender answers the receiver's probe with an echo.
+                    // The reply goes through the sender machine, so it carries
+                    // the sender's own object id: the receiver's gap
+                    // detection reads one id space per direction.
                     let reply = crate::media::ProbeEcho {
                         object_id: probe.probe_id,
                         send_epoch_ms: probe.send_epoch_ms,
@@ -1242,8 +1274,7 @@ impl Sim {
                         payload_bytes: probe.payload_bytes,
                     };
                     let payload = encode_echo(&reply);
-                    let message = self.wrap_message(FragmentClass::Feedback, payload, None);
-                    self.link.transmit(Endpoint::Sender, message);
+                    self.sender.enqueue_probe_echo(&reply, payload, now);
                 } else if let Some(envelope) = decode_input(&object.payload) {
                     self.host_input_arrive(envelope);
                 }
@@ -1344,15 +1375,20 @@ impl Sim {
             && profile.loss_permille <= 100
     }
 
-    /// The tier's echo budget: `2 × RTT + 250 ms` (MLP spec §3.1), plus one
+    /// The tier's echo budget: `2 × RTT + 250 ms` (MLP spec §9.1), plus one
     /// repair delay and the simulator's tick.
+    ///
+    /// The round trip is the one the sender measured: every timeout in the
+    /// specification is a function of the measured round trip (§9), and the
+    /// link's jitter puts the round trip above the tier's nominal point.
     ///
     /// The repair term is the honest cost of the specification's own repair policy: a
     /// lost echo-critical update is *re-encoded* rather than retransmitted, so
     /// the reflected cells can arrive no sooner than one repair delay after
     /// the loss is visible. The tier's promise is asserted on the p95.
     fn echo_budget_ms(&self) -> u64 {
-        let base = (2.0 * self.link.profile().rtt_ms + 250.0).round() as u64;
+        let rtt_ms = self.sender.estimator().rtt_ms().max(1.0);
+        let base = (2.0 * rtt_ms + 250.0).round() as u64;
         let repair = self.sender.accounting().repair_delay_ms();
         base + repair + SIM_TICK_MS
     }
@@ -1717,6 +1753,17 @@ impl Sim {
         self.trace.counters.final_state = self.sender.lane_state().as_str().to_string();
         self.trace.link = *self.link.stats();
         self.trace.counters.viewer_lost_objects = self.receiver.stats().lost_objects;
+        // The sender's own view of the link: what the estimator measured, what
+        // it paces at, and how long it waits before it repairs a cell.
+        self.trace.counters.rtt_ewma_ms = self.sender.estimator().rtt_ms();
+        self.trace.counters.rtt_min_ms = self.sender.estimator().rtt_min_ms();
+        self.trace.counters.pace_bps = self.sender.estimate().pace_bps;
+        self.trace.counters.repair_delay_ms = self.sender.accounting().repair_delay_ms();
+        self.trace.counters.rtt_samples = self.sender.stats().probe_echoes;
+        let (probes_sent, probes_failed) = self.sender.estimator().probe_counters();
+        self.trace.counters.probes_sent = probes_sent;
+        self.trace.counters.probes_failed = probes_failed;
+        self.trace.counters.echo_orphans = self.sender.stats().echo_orphans;
         let _ = self.resumes;
         self.trace
     }
