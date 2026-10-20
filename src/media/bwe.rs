@@ -1,4 +1,4 @@
-//! Bandwidth estimation (MLP spec §7.2, D-2): goodput/loss/delay hybrid.
+//! Bandwidth estimation (MLP spec §8.2, D-2): goodput/loss/delay hybrid.
 //!
 //! One [`BandwidthEstimator`] per `(sender, receiver)` media session. It is fed by
 //! the receiver's `MediaFeedback`, by per-hop `MediaHopReport`s and by the
@@ -26,7 +26,7 @@ pub enum BweMode {
     Degraded,
     /// At the floor rate: only P0 and idle updates are allowed.
     Floor,
-    /// No `MediaFeedback` for `3 × report_interval + 2 s` (MLP spec §7.2.8).
+    /// No `MediaFeedback` for `3 × report_interval + 2 s` (MLP spec §8).
     NoFeedback,
 }
 
@@ -48,7 +48,7 @@ impl BweMode {
     }
 }
 
-/// Estimator configuration; every field is a policy constant of MLP spec §7.2.
+/// Estimator configuration; every field is a policy constant of MLP spec §8.2.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BweConfig {
     /// the pace floor, default 8 000.
@@ -67,7 +67,7 @@ pub struct BweConfig {
     pub probe_interval: Duration,
     /// Maximum reports in `StartUp` before the state machine forces `Steady`.
     pub startup_max_reports: u32,
-    /// `min_delta_bytes` below which `target_fps` is reduced (MLP spec §7.2.5).
+    /// `min_delta_bytes` below which `target_fps` is reduced (MLP spec §8).
     pub min_delta_bytes: u64,
     /// Maximum probe payload.
     pub probe_payload_max: u32,
@@ -135,7 +135,7 @@ impl Estimate {
     }
 }
 
-/// A probe the sender must emit (MLP spec §7.2.6).
+/// A probe the sender must emit (MLP spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRequest {
     /// Probe payload bytes, `≤ probe_payload_max`, never cells.
@@ -155,7 +155,7 @@ pub struct ProbeOutcome {
     pub probe_rate_bps: u64,
 }
 
-/// Loss attribution across hops (MLP spec §7.2.9).
+/// Loss attribution across hops (MLP spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HopAttribution {
     /// Loss reported by the receiver's object-id gap detection.
@@ -170,7 +170,7 @@ pub struct HopAttribution {
 
 impl HopAttribution {
     /// The unattributed remainder: the number that answers "is it the last
-    /// mile or our stack?" (MLP spec §11).
+    /// mile or our stack?" (MLP spec §12).
     pub fn link_lost_objects(&self) -> u64 {
         self.viewer_lost_objects
             .saturating_sub(self.relay_dropped + self.gateway_dropped + self.other_dropped)
@@ -196,7 +196,7 @@ impl InternalState {
     }
 }
 
-/// The bandwidth estimator (MLP spec §7.2).
+/// The bandwidth estimator (MLP spec §8.2).
 ///
 /// Deterministic: every measurement derives from injected [`Instant`]s and the
 /// integer counters the receiver reports.
@@ -363,7 +363,7 @@ impl BandwidthEstimator {
         self.demand_bps = demand_bps as f64;
     }
 
-    /// Feed one receiver feedback object (MLP spec §7.2.2).
+    /// Feed one receiver feedback object (MLP spec §8).
     pub fn on_feedback(&mut self, feedback: &MediaFeedback, now: Instant) {
         let report_interval = self.report_interval();
         let _ = report_interval;
@@ -443,7 +443,7 @@ impl BandwidthEstimator {
             .max(self.config.pace_floor_bps) as f64
     }
 
-    /// `btlbw` max-filter with decay (MLP spec §7.2.3).
+    /// `btlbw` max-filter with decay (MLP spec §8).
     fn apply_max_filter(&mut self, goodput: Option<f64>) {
         let delay_threshold = 50.0f64.max(0.5 * self.rtt_min_ms);
         if self.loss_ratio > 0.02 || self.queue_delay_ms > delay_threshold {
@@ -455,7 +455,7 @@ impl BandwidthEstimator {
         self.btlbw_bps = self.btlbw_bps.max(1.0);
     }
 
-    /// The state machine and pace rule of MLP spec §7.2.4.
+    /// The state machine and pace rule of MLP spec §8.
     fn step_state_machine(&mut self, goodput: Option<f64>, loss: f64) {
         self.reports_in_state += 1;
         match self.state {
@@ -518,7 +518,7 @@ impl BandwidthEstimator {
         self.healthy_reports = 0;
     }
 
-    /// Feed one hop report (MLP spec §7.2.9, D-16).
+    /// Feed one hop report (MLP spec §8, D-16).
     pub fn on_hop_report(&mut self, report: &MediaHopReport, _now: Instant) {
         let drops = report.objects_dropped + report.coalesced;
         if report.hop == super::hop::FIRST {
@@ -560,7 +560,7 @@ impl BandwidthEstimator {
         }
     }
 
-    /// Ask whether a probe must be emitted now (MLP spec §7.2.6).
+    /// Ask whether a probe must be emitted now (MLP spec §8).
     pub fn probe_due(&mut self, now: Instant) -> Option<ProbeRequest> {
         self.on_timeout(now);
         if !self.probe_due || self.no_feedback || self.state != InternalState::Steady {
@@ -580,7 +580,7 @@ impl BandwidthEstimator {
         Some(request)
     }
 
-    /// Feed the outcome of the pending probe (MLP spec §7.2.6).
+    /// Feed the outcome of the pending probe (MLP spec §8).
     pub fn on_probe_result(&mut self, outcome: &ProbeOutcome, _now: Instant) {
         self.probe_pending = None;
         if outcome.delivered {
@@ -605,7 +605,7 @@ impl BandwidthEstimator {
         let _ = echo;
     }
 
-    /// Attribution of loss across hops (MLP spec §7.2.9).
+    /// Attribution of loss across hops (MLP spec §8).
     pub fn attribution(&self) -> HopAttribution {
         self.attribution
     }
@@ -620,11 +620,11 @@ impl BandwidthEstimator {
         (self.sent_objects, self.sent_bytes)
     }
 
-    /// Compute the current estimate (MLP spec §7.2.5).
+    /// Compute the current estimate (MLP spec §8).
     pub fn estimate(&self) -> Estimate {
         let ceiling = self.ceiling();
         if self.no_feedback {
-            // Design §6.2.8: floor × 2, one fps, small objects, no speculation.
+            // Design §7.2.8: floor × 2, one fps, small objects, no speculation.
             let pace = self.config.pace_floor_bps * 2;
             let target_fps = 1.0;
             let budget_bytes = self.budget_for(pace, target_fps, ceiling).max(256.0) as u32;
@@ -707,7 +707,7 @@ impl BandwidthEstimator {
 }
 
 /// A bounded, TTL'd store of `remembered_bps` per `(receiver, sender)` pair
-/// (MLP spec §7.2.7). Keys are hashed identities owned by the driver.
+/// (MLP spec §8). Keys are hashed identities owned by the driver.
 #[derive(Debug, Clone)]
 pub struct PriorStore {
     capacity: usize,

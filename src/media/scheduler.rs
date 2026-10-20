@@ -1,4 +1,4 @@
-//! Priority scheduling, update timing and anchor plans (MLP spec §7.3, §6.6, D-19).
+//! Priority scheduling, update timing and anchor plans (MLP spec §8.3, §7.6, D-19).
 //!
 //! The scheduler answers one question per capture cycle: *which cells should
 //! the next update for this receiver cover, under the current budget?* It owns
@@ -7,9 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::cells::{BlockGrid, CellRect, DueBlock, DueReason};
+use super::cells::{CellGrid, CellRect, DueCell, DueReason};
 
-/// The design's priority bands (MLP spec §7.3.1).
+/// The design's priority bands (MLP spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PriorityBand {
     /// P0 — input/focus region and cells pending beyond the ladder (≥50 %).
@@ -70,7 +70,7 @@ impl UpdateKind {
     }
 }
 
-/// The per-update budget the estimator produced (MLP spec §7.2.5, D-19).
+/// The per-update budget the estimator produced (MLP spec §8, D-19).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UpdateBudget {
     /// `budget_bytes`: what this update may spend.
@@ -101,7 +101,7 @@ impl Default for UpdateBudget {
 }
 
 impl UpdateBudget {
-    /// How many chunks a payload of `payload_bytes` needs (MLP spec §7.3.4).
+    /// How many chunks a payload of `payload_bytes` needs (MLP spec §8).
     ///
     /// `None` when the update cannot be carried at all: the caller must
     /// decompose it into more updates rather than emit an oversized object.
@@ -131,7 +131,7 @@ impl UpdateBudget {
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduleRequest<'a> {
     /// Cells due from cell accounting (P0/P1).
-    pub due: &'a [DueBlock],
+    pub due: &'a [DueCell],
     /// Cells whose cells changed since the emitted state (P2).
     pub fresh: &'a [u32],
     /// Cells never sent this epoch (P3).
@@ -168,7 +168,7 @@ impl ScheduleDecision {
     }
 
     /// The bounding rectangle of the update's cells.
-    pub fn rect(&self, grid: &BlockGrid) -> CellRect {
+    pub fn rect(&self, grid: &CellGrid) -> CellRect {
         grid.bounding_rect(&self.cells)
     }
 }
@@ -201,7 +201,7 @@ impl PlanStartReason {
     }
 }
 
-/// Plan policy constants (MLP spec §7.6).
+/// Plan policy constants (MLP spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlanConfig {
     /// `anchor_threshold = max(16, cells / 4)`.
@@ -357,7 +357,7 @@ impl PlanManager {
         Some(plan_id)
     }
 
-    /// Whether a plan should start (MLP spec §7.6 condition 1).
+    /// Whether a plan should start (MLP spec §8 condition 1).
     pub fn should_start_for_pending(&self, pending: u32, stuck: usize, now_ms: u64) -> bool {
         if self.active.is_some() {
             return false;
@@ -373,7 +373,7 @@ impl PlanManager {
     /// Take the next band of the active plan.
     ///
     /// Each band is a contiguous run of the plan's cell list, bounded by
-    /// `budget_bytes` and `max_object_bytes` (MLP spec §7.6). The pull is
+    /// `budget_bytes` and `max_object_bytes` (MLP spec §8). The pull is
     /// remembered in [`Self::unclaim`]'s terms: the band is consumed only by
     /// the update that paints it.
     pub fn next_band(&mut self, budget_bytes: u32, cell_bytes: u32) -> Option<PlanBand> {
@@ -382,9 +382,9 @@ impl PlanManager {
             return None;
         }
         let cell_bytes = cell_bytes.max(1);
-        let max_blocks = (budget_bytes / cell_bytes).max(1) as usize;
+        let max_cells = (budget_bytes / cell_bytes).max(1) as usize;
         let remaining = plan.cells.len() - plan.next_index;
-        let take = remaining.min(max_blocks);
+        let take = remaining.min(max_cells);
         let cells = plan.cells[plan.next_index..plan.next_index + take].to_vec();
         plan.next_index += take;
         plan.updates_emitted += 1;
@@ -534,7 +534,7 @@ pub struct SchedulerConfig {
     /// Estimated *encoded* bytes per cell, used to truncate a update to the
     /// budget before the encoder runs.
     ///
-    /// The raw cell size of a cell is `block_size² × 2` (8 KiB at 64 px),
+    /// The raw cell size of a cell is `cell_size² × 2` (8 KiB at 64 px),
     /// which is the ceiling the encoder must respect; the working estimate is
     /// far below it because a cell is carried as one or two region ops. The
     /// sender pipeline calibrates this from its bench; `0` means "use the raw
@@ -559,7 +559,7 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            cell_bytes: DEFAULT_BLOCK_BYTES,
+            cell_bytes: DEFAULT_CELL_BYTES,
             idle_interval_floor_ms: 1_000,
             idle_interval_ceiling_ms: 3_000,
             pulse_window_floor_ms: 300,
@@ -573,7 +573,7 @@ impl Default for SchedulerConfig {
 
 impl SchedulerConfig {
     /// Estimated bytes for one cell at the given grid.
-    pub fn block_bytes_for(&self, grid: &BlockGrid) -> u32 {
+    pub fn cell_bytes_for(&self, grid: &CellGrid) -> u32 {
         if self.cell_bytes != 0 {
             return self.cell_bytes;
         }
@@ -661,11 +661,11 @@ impl Default for UpdateTimer {
 ///
 /// 512 B/cell keeps a update inside the floor budget (8 kbps ⇒ 1 000 B) so the
 /// scheduler always makes progress; the encoder's own bound is the raw cell
-/// size and the sender rejects anything above `max_object_bytes` (§5.5.1).
-pub const DEFAULT_BLOCK_BYTES: u32 = 512;
-/// `IDLE_FRAME_INTERVAL_MS` floor (MLP spec §10).
+/// size and the sender rejects anything above `max_object_bytes` (§6).
+pub const DEFAULT_CELL_BYTES: u32 = 512;
+/// `IDLE_FRAME_INTERVAL_MS` floor (MLP spec §12).
 pub const IDLE_FRAME_INTERVAL_FLOOR_MS: u64 = 1_000;
-/// `IDLE_FRAME_INTERVAL_MS` ceiling (MLP spec §10).
+/// `IDLE_FRAME_INTERVAL_MS` ceiling (MLP spec §12).
 pub const IDLE_FRAME_INTERVAL_CEILING_MS: u64 = 3_000;
 
 /// The per-receiver scheduler: priority bands, pulse window and plans.
@@ -738,13 +738,13 @@ impl Scheduler {
     }
 
     /// The cells of the current focus rectangle.
-    pub fn focus_blocks(&self, grid: &BlockGrid) -> Vec<u32> {
+    pub fn focus_cells(&self, grid: &CellGrid) -> Vec<u32> {
         self.focus
-            .map(|rect| grid.blocks_in_rect(&rect))
+            .map(|rect| grid.cells_in_rect(&rect))
             .unwrap_or_default()
     }
 
-    /// Trigger an immediate input pulse (MLP spec §7.3.5).
+    /// Trigger an immediate input pulse (MLP spec §8).
     pub fn request_pulse(&mut self, now_ms: u64, rtt_ms: f64) {
         let window = self.config.pulse_window_floor_ms.max(rtt_ms.round() as u64);
         self.timer.pulse(now_ms, window);
@@ -782,7 +782,7 @@ impl Scheduler {
         ) as u64
     }
 
-    /// Whether an idle update is due (MLP spec §7.4).
+    /// Whether an idle update is due (MLP spec §8.4).
     pub fn idle_due(&self, now_ms: u64, rtt_ms: f64) -> bool {
         if self.timer.pulse_active(now_ms) {
             return false;
@@ -816,10 +816,10 @@ impl Scheduler {
     pub fn schedule(
         &mut self,
         request: ScheduleRequest<'_>,
-        grid: &BlockGrid,
+        grid: &CellGrid,
         now_ms: u64,
     ) -> ScheduleDecision {
-        let cell_bytes = self.config.block_bytes_for(grid);
+        let cell_bytes = self.config.cell_bytes_for(grid);
         // A running plan owns the update.
         if let Some(band) = self.plans.next_band(request.budget.bytes, cell_bytes) {
             let estimated = (band.cells.len() as u32).saturating_mul(cell_bytes);
@@ -836,11 +836,11 @@ impl Scheduler {
             };
         }
 
-        let focus_blocks = self.focus_blocks(grid);
+        let focus_cells = self.focus_cells(grid);
         let mut buckets: [Vec<(PriorityBand, u32)>; 4] =
             [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         // P0: the focus rectangle, then escalated/stuck repair cells.
-        for index in &focus_blocks {
+        for index in &focus_cells {
             buckets[0].push((PriorityBand::P0, *index));
         }
         for due in request.due {
@@ -946,14 +946,14 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::cells::BlockGrid;
+    use crate::media::cells::CellGrid;
 
     fn scheduler() -> Scheduler {
         Scheduler::new(SchedulerConfig::default(), PlanConfig::default())
     }
 
     fn request<'a>(
-        due: &'a [DueBlock],
+        due: &'a [DueCell],
         fresh: &'a [u32],
         refresh: &'a [u32],
         budget: UpdateBudget,
@@ -976,8 +976,8 @@ mod tests {
         }
     }
 
-    fn due(index: u32, reason: DueReason, rounds: u8) -> DueBlock {
-        DueBlock {
+    fn due(index: u32, reason: DueReason, rounds: u8) -> DueCell {
+        DueCell {
             index,
             reason,
             rounds,
@@ -985,9 +985,9 @@ mod tests {
     }
 
     #[test]
-    fn fresh_blocks_are_scheduled_as_deltas() {
+    fn fresh_cells_are_scheduled_as_deltas() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(320, 320, 32);
+        let grid = CellGrid::with_cell_size(320, 320, 32);
         let fresh: Vec<u32> = vec![1, 2, 3];
         let decision = scheduler.schedule(request(&[], &fresh, &[], roomy_budget()), &grid, 0);
         assert_eq!(decision.cells, vec![1, 2, 3]);
@@ -1000,7 +1000,7 @@ mod tests {
     fn budget_truncates_the_frame_and_counts_deferred() {
         let scheduler = scheduler();
         let _ = scheduler.idle_interval_ms_for(50.0);
-        let grid = BlockGrid::with_block_size(320, 320, 32);
+        let grid = CellGrid::with_cell_size(320, 320, 32);
         let budget = UpdateBudget {
             bytes: 2_048,
             ..UpdateBudget::default()
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn priority_order_is_p0_then_p1_then_p2_then_p3() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(320, 320, 32);
+        let grid = CellGrid::with_cell_size(320, 320, 32);
         let due = [due(10, DueReason::Repair, 1)];
         let fresh = [20];
         let refresh = [30];
@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn focus_rect_wins_p0() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(256, 256, 32);
+        let grid = CellGrid::with_cell_size(256, 256, 32);
         scheduler.mark_focus(CellRect::new(64, 64, 64, 64));
         let fresh = [0];
         let decision = scheduler.schedule(request(&[], &fresh, &[], roomy_budget()), &grid, 0);
@@ -1052,7 +1052,7 @@ mod tests {
     #[test]
     fn escalated_repair_becomes_p0() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(256, 256, 32);
+        let grid = CellGrid::with_cell_size(256, 256, 32);
         let due = [
             due(5, DueReason::Repair, 1),
             due(6, DueReason::Escalated, 5),
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn anchor_request_marks_the_frame() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(256, 256, 32);
+        let grid = CellGrid::with_cell_size(256, 256, 32);
         let fresh = [0, 1];
         let mut req = request(&[], &fresh, &[], roomy_budget());
         req.anchor = true;
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn an_empty_decision_is_an_idle_frame() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(256, 256, 32);
+        let grid = CellGrid::with_cell_size(256, 256, 32);
         let decision =
             scheduler.schedule(request(&[], &[], &[], UpdateBudget::default()), &grid, 0);
         assert!(decision.is_empty());
@@ -1223,7 +1223,7 @@ mod tests {
     #[test]
     fn plan_frames_win_over_fresh_work() {
         let mut scheduler = scheduler();
-        let grid = BlockGrid::with_block_size(256, 256, 32);
+        let grid = CellGrid::with_cell_size(256, 256, 32);
         let plan_id = scheduler
             .plans_mut()
             .start(PlanStartReason::Resume, vec![1, 2, 3], 0)

@@ -1,4 +1,4 @@
-//! Media-lane pacing (MLP spec §7.4, D-3 rule 3): one token bucket plus a
+//! Media-lane pacing (MLP spec §8.4, D-3 rule 3): one token bucket plus a
 //! bounded 1-second window, with a reserved floor for control traffic.
 //!
 //! The pacer is the only authority for *when* a fragment may leave. The sender
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::pdu::{Carrier, TrafficClass};
 
-/// Maximum bytes a stream carrier may release in one poll (MLP spec §7.4).
+/// Maximum bytes a stream carrier may release in one poll (MLP spec §8.4).
 pub const STREAM_RELEASE_MAX: u64 = 64 * 1024;
 /// Reserved-rate floor: `reserved_rate = max(2 kbps, 10 % × pace)` (MLP spec annex D, D-3).
 pub const RESERVED_RATE_FLOOR_BPS: u64 = 2_000;
@@ -32,7 +32,7 @@ pub const BURST_ALLOWANCE_RATIO: f64 = 1.25;
 /// above this size is segmented by the sender before it reaches the pacer.
 pub const MAX_GRANT_BYTES: u64 = 16 * 1024;
 
-/// Pacer configuration. Every value is a policy constant of MLP spec §7.4.
+/// Pacer configuration. Every value is a policy constant of MLP spec §8.4.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PacerConfig {
     /// Current pace in bits per second.
@@ -373,7 +373,7 @@ impl MediaPacer {
     /// How many bytes may be released right now for a carrier.
     ///
     /// Stream carriers release up to 64 KiB per poll; datagram carriers
-    /// release exactly one fragment's worth (MLP spec §7.4).
+    /// release exactly one fragment's worth (MLP spec §8.4).
     pub fn release_budget(&self, carrier: Carrier, class: TrafficClass) -> u64 {
         let tokens = self.bucket.tokens().max(0.0) as u64;
         let usable = if class.is_media() {

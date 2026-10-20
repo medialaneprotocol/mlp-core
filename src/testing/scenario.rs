@@ -1,4 +1,4 @@
-//! Deterministic scenario runner (MLP spec §12).
+//! Deterministic scenario runner (MLP spec §10).
 //!
 //! [`run`] drives both ends of a media session as real sans-IO machines over a
 //! [`LossyLink`]: the sender side holds a [`MediaSenderMachine`], the receiver side
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::media::cells::{BlockGrid, CellRect};
+use crate::media::cells::{CellGrid, CellRect};
 use crate::media::input::{
     GatewayInputEnvelope, HostInputConfig, HostInputState, InputFlags, InputKind as InputEventKind,
     InputQueueConfig, InputToken, ViewerInputQueue, decode_pressed_set, encode_pressed_set,
@@ -52,9 +52,9 @@ pub const SIM_OBJECT_ID_BASE: u32 = 0x4000_0000;
 /// Bytes of the cell bitmap at the head of a simulated update payload.
 pub const SIM_BITMAP_BYTES: usize = 256;
 /// Simulated encoded bytes per cell: the update-size model the runner uses.
-pub const SIM_BYTES_PER_BLOCK: usize = 256;
+pub const SIM_BYTES_PER_CELL: usize = 256;
 
-/// The design's invariants (MLP spec §12).
+/// The design's invariants (MLP spec §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Invariant {
     /// A update is applied only if every chunk arrived.
@@ -113,7 +113,7 @@ impl Invariant {
     }
 }
 
-/// A scenario step (MLP spec §12).
+/// A scenario step (MLP spec §10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Step {
     /// Advance the clock.
@@ -136,7 +136,7 @@ pub enum Step {
     Assert(Invariant),
 }
 
-/// A scenario (MLP spec §12).
+/// A scenario (MLP spec §10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     /// A stable name for the corpus.
@@ -145,9 +145,9 @@ pub struct Scenario {
     pub tier: Tier,
     /// Steps, in order.
     pub steps: Vec<Step>,
-    /// Concurrent viewers (only 1 is simulated end to end today; the field is
+    /// Concurrent receivers (only 1 is simulated end to end today; the field is
     /// part of the frozen corpus format).
-    pub viewers: u8,
+    pub receivers: u8,
 }
 
 impl Scenario {
@@ -157,7 +157,7 @@ impl Scenario {
             name: name.into(),
             tier,
             steps: Vec::new(),
-            viewers: 1,
+            receivers: 1,
         }
     }
 
@@ -307,7 +307,7 @@ pub struct TraceCounters {
     pub stale_applies_skipped: u64,
     /// Cells whose held update is older than the emitted state at a converged
     /// observation (reported, not hidden).
-    pub canvas_behind_blocks: u64,
+    pub canvas_behind_cells: u64,
     /// Pacer refusals observed by the sender (S-14's fixture-level pacing check).
     pub pacer_waits: u64,
     /// The longest pacer refusal, in ms.
@@ -443,7 +443,7 @@ struct HostModel {
 
 struct Sim {
     tier: Tier,
-    grid: BlockGrid,
+    grid: CellGrid,
     link: LossyLink,
     now_ms: u64,
     epoch: Instant,
@@ -484,7 +484,7 @@ pub fn run(scenario: &Scenario) -> Trace {
 
 /// Run a scenario with a simulated intermediary hop that drops and reports objects.
 pub fn run_with_relay(scenario: &Scenario, intermediary: IntermediaryModel) -> Trace {
-    let grid = BlockGrid::with_block_size(1920, 1080, 64);
+    let grid = CellGrid::with_cell_size(1920, 1080, 64);
     let profile = LinkProfile::tier(scenario.tier);
     let epoch = crate::testing::test_epoch();
     let carrier = carrier_for(&profile);
@@ -506,7 +506,7 @@ fn carrier_for(profile: &LinkProfile) -> Carrier {
 impl Sim {
     fn new(
         scenario: &Scenario,
-        grid: BlockGrid,
+        grid: CellGrid,
         profile: LinkProfile,
         carrier: Carrier,
         epoch: Instant,
@@ -517,7 +517,7 @@ impl Sim {
         let mut sender_config = MediaSenderConfig::new(carrier, grid);
         sender_config.accounting.datagram = carrier.is_datagram();
         sender_config.bwe.pace_floor_bps = 8_000;
-        // A remembered prior (MLP spec §7.2.7, TTL 60 min): the pace a previous
+        // A remembered prior (MLP spec §8, TTL 60 min): the pace a previous
         // session on this link reached. The tier promises are steady-state
         // ones, and the prior is what makes them reachable in a scenario
         // shorter than the StartUp ladder. The no-prior cold start has its own
@@ -561,7 +561,7 @@ impl Sim {
                 parks: 0,
                 echo_outliers: 0,
                 stale_applies_skipped: 0,
-                canvas_behind_blocks: 0,
+                canvas_behind_cells: 0,
                 pacer_waits: 0,
                 max_pacer_wait_ms: 0,
                 state_changes: 0,
@@ -638,7 +638,7 @@ impl Sim {
                 self.link.set_profile((**profile).clone());
             }
             Step::CaptureChange(rect) => {
-                for cell in self.grid.blocks_in_rect(rect) {
+                for cell in self.grid.cells_in_rect(rect) {
                     if !self.capture_dirty.contains(&cell) {
                         self.capture_dirty.push(cell);
                     }
@@ -810,7 +810,7 @@ impl Sim {
     }
 
     /// Tell the estimator there is more work than the pace allows: this is
-    /// what arms the demand-driven probe (MLP spec §7.2.6) and lets the pace
+    /// what arms the demand-driven probe (MLP spec §8) and lets the pace
     /// climb on a link whose loss keeps StartUp from growing it.
     fn report_demand(&mut self, now: Instant) {
         let pending = self.sender.accounting().pending_count()
@@ -836,7 +836,7 @@ impl Sim {
         }
     }
 
-    /// Fail probes whose echo never came back (MLP spec §7.2.6).
+    /// Fail probes whose echo never came back (MLP spec §8).
     fn expire_probes(&mut self, now: Instant) {
         let deadline = (2.0 * self.link.profile().rtt_ms + 250.0).round() as u64;
         let mut expired = Vec::new();
@@ -1049,7 +1049,7 @@ impl Sim {
                             continue;
                         }
                     }
-                    let cells = decode_block_bitmap(&object.payload, self.grid.cells());
+                    let cells = decode_cell_bitmap(&object.payload, self.grid.cells());
                     if self
                         .receiver
                         .is_chunk_applied(meta.update_id, meta.part_index)
@@ -1066,7 +1066,7 @@ impl Sim {
                         continue;
                     }
                     // Codec chaining: a delta needs its base, an anchor may be
-                    // applied onto any held state (MLP spec §6.1). A refused
+                    // applied onto any held state (MLP spec §7.1). A refused
                     // update is a `gap`: its cells stay pending and the sender
                     // repairs them or starts a plan.
                     if !object.is_anchor()
@@ -1144,12 +1144,12 @@ impl Sim {
                 })
                 .collect();
             if let Some((cell, canvas, emitted)) = mismatches.first().copied() {
-                self.trace.counters.canvas_behind_blocks += mismatches.len() as u64;
+                self.trace.counters.canvas_behind_cells += mismatches.len() as u64;
                 // INV-2 as the accounting can prove it: a converged receiver
                 // holds cells for every cell the sender has emitted. A canvas
                 // *older* than the emitted state can occur while a reordered or
                 // repaired update is in flight — the playout guard keeps the
-                // newer cells — so it is reported as `canvas_behind_blocks`,
+                // newer cells — so it is reported as `canvas_behind_cells`,
                 // and only a *missing* cell is a violation.
                 if canvas == 0 && emitted > 0 {
                     self.violate(
@@ -1316,7 +1316,7 @@ impl Sim {
             let first_application = self.input_applied_seq < seq;
             self.input_applied_seq = self.input_applied_seq.max(seq);
             if first_application {
-                // Design §6.3.5: on applying input the sender emits an immediate
+                // Design §7.3.5: on applying input the sender emits an immediate
                 // pulse update covering the focus region, so the echo promise is
                 // met on the very next update rather than the next idle update.
                 self.sender
@@ -1733,11 +1733,11 @@ fn payload_len(decision: &ScheduleDecision) -> usize {
     decision
         .cells
         .len()
-        .saturating_mul(SIM_BYTES_PER_BLOCK)
+        .saturating_mul(SIM_BYTES_PER_CELL)
         .max(32)
 }
 
-fn decode_block_bitmap(payload: &[u8], cells: u32) -> Vec<u32> {
+fn decode_cell_bitmap(payload: &[u8], cells: u32) -> Vec<u32> {
     let mut out = Vec::new();
     for cell in 0..cells {
         let byte = (cell / 8) as usize;

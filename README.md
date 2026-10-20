@@ -51,7 +51,7 @@ A driver implements both and owns the carrier.
 | `media::bwe` | the bandwidth estimator |
 | `media::pacer` | the token-bucket pacer |
 | `media::scheduler` | priority scheduling and repair plans |
-| `media::blocks` | per-receiver convergence accounting over a repair-cell grid |
+| `media::cells` | per-receiver convergence accounting over a repair-cell grid |
 | `media::resume` | parking, resume, the reconnect ladder |
 | `media::input` | the input path: sequencing, deadlines, the pressed set |
 | `media::lifecycle` | the lane's state vocabulary |

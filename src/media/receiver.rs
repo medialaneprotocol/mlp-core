@@ -1,4 +1,4 @@
-//! The media-lane receiver machine (receiver → sender direction, MLP spec §5.4).
+//! The media-lane receiver machine (receiver → sender direction, MLP spec §6.4).
 //!
 //! [`MediaReceiverMachine`] turns carrier messages into complete objects,
 //! enforces the transport rules (magic/version/class/flags/priority, the
@@ -138,7 +138,7 @@ pub struct MediaReceiverMachine {
     highest_applied: u64,
     bitmap: u64,
     applied_count: u32,
-    stale_blocks: u32,
+    stale_cells: u32,
     converged: bool,
     render_latency_ms: f64,
     echo_of_input_seq: u64,
@@ -189,7 +189,7 @@ impl MediaReceiverMachine {
             highest_applied: 0,
             bitmap: 0,
             applied_count: 0,
-            stale_blocks: 0,
+            stale_cells: 0,
             converged: false,
             render_latency_ms: 0.0,
             echo_of_input_seq: 0,
@@ -289,7 +289,7 @@ impl MediaReceiverMachine {
     /// Parse and assemble one carrier message.
     ///
     /// On stream carriers the message may hold 1..N fragments; on datagram
-    /// carriers exactly one (MLP spec §5.1).
+    /// carriers exactly one (MLP spec §6.1).
     pub fn on_message(&mut self, bytes: &[u8], now: Instant) -> Vec<MediaReceiveEvent> {
         let fragments = match super::pdu::parse_message(bytes, self.config.carrier) {
             Ok(fragments) => fragments,
@@ -487,7 +487,7 @@ impl MediaReceiverMachine {
     }
 
     /// Note that the driver applied a chunk: the idempotence record for `DUP`
-    /// objects (MLP spec §6.1).
+    /// objects (MLP spec §7.1).
     pub fn note_applied_chunk(&mut self, update_id: u64, part_index: u16) {
         let key = (update_id, part_index);
         if self.applied_set.insert(key) {
@@ -506,14 +506,9 @@ impl MediaReceiverMachine {
     }
 
     /// Update the receiver's own convergence belief.
-    pub fn set_viewer_state(
-        &mut self,
-        stale_blocks: u32,
-        applied_block_count: u32,
-        converged: bool,
-    ) {
-        self.stale_blocks = stale_blocks;
-        self.applied_count = applied_block_count;
+    pub fn set_viewer_state(&mut self, stale_cells: u32, applied_cell_count: u32, converged: bool) {
+        self.stale_cells = stale_cells;
+        self.applied_count = applied_cell_count;
         self.converged = converged;
     }
 
@@ -565,8 +560,8 @@ impl MediaReceiverMachine {
             highest_applied_update_id: self.highest_applied,
             ack_bitmap: self.bitmap,
             chain_epoch: self.epoch,
-            applied_block_count: self.applied_count,
-            stale_blocks: self.stale_blocks,
+            applied_cell_count: self.applied_count,
+            stale_cells: self.stale_cells,
             converged: self.converged,
             render_latency_ms: self.render_latency_ms,
             has_render_latency_ms: self.render_latency_ms > 0.0,
@@ -718,7 +713,7 @@ mod tests {
             send_epoch_ms: 0,
         };
         let mut ext = meta.to_ext();
-        let _ = ext.push_u32(tlv::BLOCK_COUNT, 4);
+        let _ = ext.push_u32(tlv::CELL_COUNT, 4);
         Fragment::new(
             FragmentClass::Media,
             FragmentFlags::FIN.union(FragmentFlags::ANCHOR),
@@ -843,7 +838,7 @@ mod tests {
         assert!(ack.is_applied(2));
         assert!(ack.is_applied(1));
         assert!(!ack.is_applied(3));
-        assert_eq!(ack.applied_block_count, 510);
+        assert_eq!(ack.applied_cell_count, 510);
         assert!(ack.converged);
         assert_eq!(ack.validate(), Ok(()));
     }

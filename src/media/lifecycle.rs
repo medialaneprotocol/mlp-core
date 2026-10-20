@@ -1,5 +1,5 @@
-//! Lane lifecycle, honest states and the capture/encode policy (MLP spec §7.5,
-//! §6.7, §7.5, §12.2).
+//! Lane lifecycle, honest states and the capture/encode policy (MLP spec §8,
+//! §7, §8, §10).
 //!
 //! Two things live here: the authoritative lane state the sender reports
 //! (`MediaLaneState.state`, values 0..9) and the policy decisions a driver
@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::MediaPath;
 
-/// The sender's authoritative lane state (MLP spec §6.3).
+/// The sender's authoritative lane state (MLP spec §7.3).
 ///
-/// The receiver's UI maps these values to the honest strings of §6.7.
+/// The receiver's UI maps these values to the honest strings of §7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum MediaLaneStateKind {
@@ -32,7 +32,7 @@ pub enum MediaLaneStateKind {
     Disabled = 6,
     /// The receiver is decode-bound; the sender clamped `target_fps`.
     DecodeBound = 7,
-    /// No feedback from the receiver (MLP spec §7.2.8).
+    /// No feedback from the receiver (MLP spec §8).
     NoFeedback = 8,
     /// The peer does not speak MLP v1 (MLP spec annex D, D-4).
     MediaUnsupported = 9,
@@ -91,7 +91,7 @@ impl MediaLaneStateKind {
     }
 }
 
-/// `MediaClose.code` (MLP spec §6.3).
+/// `MediaClose.code` (MLP spec §7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum MediaCloseCode {
@@ -156,7 +156,7 @@ impl LaneMode {
     }
 }
 
-/// Typed reason a peer cannot carry the media lane (MLP spec §6.3, D-4).
+/// Typed reason a peer cannot carry the media lane (MLP spec §7.3, D-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MediaUnsupportedReason {
     /// The peer speaks an incompatible protocol version.
@@ -164,7 +164,7 @@ pub enum MediaUnsupportedReason {
     /// Deployment policy disabled the lane.
     DisabledByPolicy,
     /// The sender cannot serve another receiver.
-    NoHostCapability,
+    NoSenderCapability,
 }
 
 impl MediaUnsupportedReason {
@@ -173,7 +173,7 @@ impl MediaUnsupportedReason {
         match self {
             Self::Protocol => "protocol",
             Self::DisabledByPolicy => "disabled_by_policy",
-            Self::NoHostCapability => "no_host_capability",
+            Self::NoSenderCapability => "no_sender_capability",
         }
     }
 
@@ -185,7 +185,7 @@ impl MediaUnsupportedReason {
         match value {
             "protocol" => Some(Self::Protocol),
             "disabled_by_policy" => Some(Self::DisabledByPolicy),
-            "no_host_capability" => Some(Self::NoHostCapability),
+            "no_sender_capability" => Some(Self::NoSenderCapability),
             _ => None,
         }
     }
@@ -316,7 +316,7 @@ impl LaneLifecycle {
 
     /// Consume evidence and return the new state when it changed.
     ///
-    /// The state vocabulary is the honest degradation ladder of MLP spec §7.7:
+    /// The state vocabulary is the honest degradation ladder of MLP spec §8:
     /// `Disabled`/`MediaUnsupported` are terminal, `Parked` is a deliberate
     /// hold, and the live states differ only in what they claim.
     pub fn update(&mut self, evidence: &LaneEvidence) -> Option<MediaLaneStateKind> {
@@ -389,7 +389,7 @@ impl LaneLifecycle {
     }
 }
 
-/// What the capture/encoder loop must do right now (MLP spec §8.5).
+/// What the capture/encoder loop must do right now (MLP spec §9.5).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CaptureDecision {
     /// Whether to capture at all.
@@ -404,7 +404,7 @@ pub struct CaptureDecision {
     pub detail: Option<&'static str>,
 }
 
-/// The capture policy of MLP spec §8.5, expressed as a pure decision.
+/// The capture policy of MLP spec §9.5, expressed as a pure decision.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CapturePolicy {
     /// the park-hold switch: capture continues while a receiver is parked.
@@ -431,7 +431,7 @@ impl Default for CapturePolicy {
 impl CapturePolicy {
     /// Decide the capture/encode posture.
     ///
-    /// `live_viewers` counts viewers that are connected (parked ones are
+    /// `live_viewers` counts receivers that are connected (parked ones are
     /// covered by `parked_viewers`); `park_expired` is true once the park
     /// window has closed for every parked receiver.
     pub fn decide(
@@ -453,7 +453,7 @@ impl CapturePolicy {
             };
         }
         if live_viewers == 0 {
-            // Parked viewers still need the journal and pending growth.
+            // Parked receivers still need the journal and pending growth.
             if park_expired && !self.park_hold {
                 return CaptureDecision {
                     capture: false,
@@ -497,7 +497,7 @@ impl CapturePolicy {
 }
 
 /// Deployment policy values the drivers obtain from configuration (MLP spec
-/// §12.2). This struct carries the *decisions*, not the environment reads.
+/// §10). This struct carries the *decisions*, not the environment reads.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MediaLanePolicy {
     /// the lane-enable switch.
@@ -545,7 +545,7 @@ impl MediaLanePolicy {
     /// Whether anchors may be applied onto any held state.
     ///
     /// With strict-chaining mode the sender keeps strict chaining and only
-    /// uses anchors on an epoch change (MLP spec §12.2).
+    /// uses anchors on an epoch change (MLP spec §10).
     pub fn anchors_on_any_state(&self) -> bool {
         self.patch_mode
     }
@@ -582,7 +582,7 @@ mod tests {
         for reason in [
             MediaUnsupportedReason::Protocol,
             MediaUnsupportedReason::DisabledByPolicy,
-            MediaUnsupportedReason::NoHostCapability,
+            MediaUnsupportedReason::NoSenderCapability,
         ] {
             assert_eq!(MediaUnsupportedReason::parse(reason.as_str()), Some(reason));
         }

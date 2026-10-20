@@ -1,4 +1,4 @@
-//! Input path (MLP spec §8, D-8): receiver queue and sender-side policy.
+//! Input path (MLP spec §9, D-8): receiver queue and sender-side policy.
 //!
 //! Input rides the control lane with an [`GatewayInputEnvelope`] wrapper. Two
 //! machines live here:
@@ -15,20 +15,20 @@ use serde::{Deserialize, Serialize};
 
 /// Default input deadline: the input deadline.
 pub const INPUT_DEADLINE_MS: u64 = 5_000;
-/// Receiver queue object capacity (MLP spec §9.2).
+/// Receiver queue object capacity (MLP spec §13).
 pub const INPUT_QUEUE_OBJECTS: usize = 64;
-/// Receiver queue byte capacity (MLP spec §9.2).
+/// Receiver queue byte capacity (MLP spec §13).
 pub const INPUT_QUEUE_BYTES: usize = 8 * 1024;
-/// Sender input worker capacity (MLP spec §9.3).
+/// Sender input worker capacity (MLP spec §13).
 pub const HOST_WORKER_CAPACITY: usize = 64;
-/// `(epoch, seq)` dedup window (MLP spec §9.3).
+/// `(epoch, seq)` dedup window (MLP spec §13).
 pub const INPUT_DEDUP_WINDOW: usize = 4096;
-/// `key_release_grace` after parking (MLP spec §9.3).
+/// `key_release_grace` after parking (MLP spec §13).
 pub const KEY_RELEASE_GRACE_MS: u64 = 2_000;
-/// Wheel accumulation ceiling in notches (MLP spec §9.2).
+/// Wheel accumulation ceiling in notches (MLP spec §13).
 pub const WHEEL_DELTA_CAP: i32 = 8;
 
-/// The `kind` field of `GatewayInputEnvelope` (MLP spec §9.1).
+/// The `kind` field of `GatewayInputEnvelope` (MLP spec §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum InputKind {
@@ -69,7 +69,7 @@ impl InputKind {
     }
 
     /// Whether the kind is a key/button transition that must never be dropped
-    /// while queued (MLP spec §9.2).
+    /// while queued (MLP spec §13).
     pub const fn is_transition(self) -> bool {
         matches!(self, Self::Key | Self::PointerButton)
     }
@@ -88,7 +88,7 @@ impl InputKind {
     }
 }
 
-/// The `flags` field of `GatewayInputEnvelope` (MLP spec §9.1).
+/// The `flags` field of `GatewayInputEnvelope` (MLP spec §13).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InputFlags(u8);
 
@@ -143,7 +143,7 @@ impl core::fmt::Debug for InputFlags {
     }
 }
 
-/// The `GatewayInputEnvelope` (MLP spec §9.1).
+/// The `GatewayInputEnvelope` (MLP spec §13).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayInputEnvelope {
     /// Monotonic per receiver epoch; the dedup boundary.
@@ -387,7 +387,7 @@ pub enum PushOutcome {
     Dropped(InputDropReason),
 }
 
-/// The receiver-side bounded, deadline-aware input queue (MLP spec §9.2).
+/// The receiver-side bounded, deadline-aware input queue (MLP spec §13).
 #[derive(Debug, Clone)]
 pub struct ViewerInputQueue {
     config: InputQueueConfig,
@@ -596,7 +596,7 @@ impl ViewerInputQueue {
     }
 
     /// Replay for a resume: queued objects in sequence order plus one
-    /// pressed-set object (MLP spec §9.2).
+    /// pressed-set object (MLP spec §13).
     pub fn replay(&mut self, now_ms: u64) -> Vec<GatewayInputEnvelope> {
         let mut ready = self.take_ready(now_ms);
         ready.push(self.pressed_set_envelope(now_ms));
@@ -611,7 +611,7 @@ impl ViewerInputQueue {
         self.make(InputKind::PressedSet, InputFlags::CRITICAL, payload, now_ms)
     }
 
-    /// Whether the pressed-set heartbeat is due (MLP spec §9.3 rule 4).
+    /// Whether the pressed-set heartbeat is due (MLP spec §13 rule 4).
     pub fn pressed_heartbeat_due(&self, now_ms: u64) -> bool {
         now_ms >= self.next_pressed_heartbeat_ms
     }
@@ -717,7 +717,7 @@ impl ViewerInputQueue {
     fn expire(&mut self, now_ms: u64) {
         let before = self.queue.len();
         self.queue.retain(|envelope| {
-            // Releases and pressed sets are always applied (MLP spec §9.3 rule 3),
+            // Releases and pressed sets are always applied (MLP spec §13 rule 3),
             // so they are never expired here either.
             !envelope.is_expired(now_ms) || envelope.is_always_applied()
         });
@@ -761,7 +761,7 @@ impl HostInputReject {
     }
 }
 
-/// Why the sender released keys (MLP spec §9.3 rule 4).
+/// Why the sender released keys (MLP spec §13 rule 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReleaseReason {
     /// A `pressed_set` did not contain them.
@@ -806,7 +806,7 @@ pub struct InputOutcome {
     pub releases: Vec<InputRelease>,
 }
 
-/// Sender input policy (MLP spec §9.3).
+/// Sender input policy (MLP spec §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInputConfig {
     /// `(epoch, seq)` dedup window.
@@ -995,7 +995,7 @@ impl HostInputState {
         self.parked_at_ms = None;
     }
 
-    /// Release everything once the park grace elapses (MLP spec §9.3 rule 4).
+    /// Release everything once the park grace elapses (MLP spec §13 rule 4).
     pub fn poll_grace_release(&mut self, now_ms: u64) -> Option<InputRelease> {
         let parked_at = self.parked_at_ms?;
         if now_ms.saturating_sub(parked_at) < self.config.key_release_grace_ms {

@@ -1,4 +1,4 @@
-//! MLP object assembly (MLP spec §5.4) — the receiver-side lifecycle.
+//! MLP object assembly (MLP spec §6.4) — the receiver-side lifecycle.
 //!
 //! An object is complete only when **every** fragment index arrived *and* the
 //! `FIN` flag was seen. Partial objects are never delivered (MLP spec annex INV, INV-1), are
@@ -15,11 +15,11 @@ use super::pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, UpdateMeta,
 };
 
-/// Bound on simultaneously open objects per lane (MLP spec §5.4).
+/// Bound on simultaneously open objects per lane (MLP spec §6.4).
 pub const MAX_OPEN_OBJECTS: usize = 4;
-/// Bound on the bytes held by incomplete objects per lane (MLP spec §5.4).
+/// Bound on the bytes held by incomplete objects per lane (MLP spec §6.4).
 pub const MAX_ASSEMBLY_BYTES: usize = 1024 * 1024;
-/// Size of the `(object_id, fragment_index)` dedupe window (MLP spec §5.4 step 5).
+/// Size of the `(object_id, fragment_index)` dedupe window (MLP spec §6.4 step 5).
 pub const DEDUP_WINDOW: usize = 4096;
 
 /// Assembly tuning.
@@ -286,7 +286,7 @@ impl ObjectAssembler {
     /// Feed one parsed fragment.
     ///
     /// `session_ms` is the receiver's own session-relative millisecond clock
-    /// (MLP spec §5.3: deadlines and echoes are session-relative, so no wall
+    /// (MLP spec §6.3: deadlines and echoes are session-relative, so no wall
     /// clock is ever read).
     pub fn accept(&mut self, fragment: Fragment, session_ms: u64, now: Instant) -> AssemblyOutcome {
         let object_id = fragment.header.object_id;
@@ -432,7 +432,7 @@ impl ObjectAssembler {
     /// Ensure a new fragment of `incoming_bytes` fits the budgets.
     ///
     /// Evicts the oldest incomplete object when the object count or the byte
-    /// budget would be exceeded (MLP spec §5.4). Returns `false` only when even
+    /// budget would be exceeded (MLP spec §6.4). Returns `false` only when even
     /// an empty table cannot hold the fragment (an impossibility in practice:
     /// the fragment cap is 64 KiB and the byte budget 1 MiB).
     fn make_room(&mut self, incoming_bytes: usize) -> bool {
@@ -492,7 +492,7 @@ impl ObjectAssembler {
     /// Whether the fragment's class is a legal media-lane class for its fields.
     ///
     /// Media objects must carry `UPDATE_ID` metadata; a media object without it
-    /// cannot be acked and is a body-invalid object (MLP spec §6.1).
+    /// cannot be acked and is a body-invalid object (MLP spec §7.1).
     pub fn classify(object: &MediaObject) -> Result<(), RejectReason> {
         if object.class == FragmentClass::Media && object.ext.update_id().is_none() {
             return Err(RejectReason::BodyInvalid);
@@ -508,8 +508,8 @@ impl ObjectAssembler {
         object.class == FragmentClass::Cursor && object.payload.len() > 1_150
     }
 
-    /// The `tlv::BLOCK_COUNT` hint of an object, when present.
-    pub fn block_count_hint(object: &MediaObject) -> Option<u32> {
+    /// The `tlv::CELL_COUNT` hint of an object, when present.
+    pub fn cell_count_hint(object: &MediaObject) -> Option<u32> {
         object.ext.cell_count()
     }
 
@@ -760,13 +760,13 @@ mod tests {
         let (mut assembler, now) = assemble_three();
         let mut ext = HeaderExt::new();
         ext.push_u64(tlv::UPDATE_ID, 42).expect("fits");
-        ext.push_u32(tlv::BLOCK_COUNT, 510).expect("fits");
+        ext.push_u32(tlv::CELL_COUNT, 510).expect("fits");
         let outcome = assembler.accept(fragment(41, 0, 1, true, vec![9], ext), 0, now);
         match outcome {
             AssemblyOutcome::Object(object) => {
                 let meta = object.update_meta().expect("update meta");
                 assert_eq!(meta.update_id, 42);
-                assert_eq!(ObjectAssembler::block_count_hint(&object), Some(510));
+                assert_eq!(ObjectAssembler::cell_count_hint(&object), Some(510));
                 assert!(object.is_media());
                 assert_eq!(ObjectAssembler::classify(&object), Ok(()));
                 assert_eq!(object.byte_len(), 1);

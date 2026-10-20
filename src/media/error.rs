@@ -1,16 +1,16 @@
 //! Error taxonomy for the media lane (MLP v1).
 //!
-//! The numeric codes are the wire values of `MediaError.code` (MLP spec §6.3);
+//! The numeric codes are the wire values of `MediaError.code` (MLP spec §7.3);
 //! [`RejectReason`] is the richer receiver-side vocabulary, including drops
 //! that are never reported back to the peer (expiry, duplicates, coalescing).
 
 use serde::{Deserialize, Serialize};
 
-/// Numeric `MediaError.code` values (MLP spec §6.3).
+/// Numeric `MediaError.code` values (MLP spec §7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum MediaErrorCode {
-    /// The transport message did not start with `MLP` (MLP spec §5.2).
+    /// The transport message did not start with `MLP` (MLP spec §6.2).
     BadMagic = 1,
     /// `version` was not `2`.
     UnsupportedVersion = 2,
@@ -141,7 +141,7 @@ pub enum RejectReason {
     FragmentMismatch,
     /// The ack bitmap had bits set above `highest_applied_update_id`.
     AckBadBitmap,
-    /// `stale_blocks > applied_block_count`.
+    /// `stale_cells > applied_cell_count`.
     AckBadCount,
     /// The object was dropped because a newer plan covers its cells.
     SupersededByPlan,

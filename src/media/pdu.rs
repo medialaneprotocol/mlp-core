@@ -1,4 +1,4 @@
-//! MLP v1 fragment framing (MLP spec §5.1–§5.4, §6.1) — byte level.
+//! MLP v1 fragment framing (MLP spec §6.1–§6.4, §7.1) — byte level.
 //!
 //! Little-endian throughout; offsets are from the first byte of the fragment:
 //!
@@ -33,20 +33,20 @@ pub const FRAGMENT_MAGIC: [u8; 4] = *b"MLP\0";
 pub const MEDIA_PROTOCOL_VERSION: u8 = 1;
 /// Fixed header size (bytes before the header extension).
 pub const FRAGMENT_FIXED_HEADER: usize = 22;
-/// Maximum `fragment_count` the wire field admits (MLP spec §5.2).
+/// Maximum `fragment_count` the wire field admits (MLP spec §6.2).
 pub const MAX_FRAGMENT_COUNT: u16 = 4096;
-/// Maximum `header_ext_len` (MLP spec §5.2).
+/// Maximum `header_ext_len` (MLP spec §6.2).
 pub const MAX_HEADER_EXT: u16 = 256;
-/// Payload cap of a WebSocket carrier message (MLP spec §5.1).
+/// Payload cap of a WebSocket carrier message (MLP spec §6.1).
 pub const MAX_WS_FRAGMENT: usize = 65_536;
-/// Cap of concatenated fragments in one gRPC `MediaEnvelope` (MLP spec §5.1).
+/// Cap of concatenated fragments in one gRPC `MediaEnvelope` (MLP spec §6.1).
 pub const MAX_GRPC_COALESCE: usize = 65_536;
-/// Fragment payload target on the S2 datagram carriers (MLP spec §5.1).
+/// Fragment payload target on the S2 datagram carriers (MLP spec §6.1).
 pub const TARGET_FRAGMENT_PAYLOAD: usize = 1_150;
 /// The control lane never carries a media fragment above this size (MLP spec §4.2).
 pub const MAX_CONTROL_LANE_OBJECT_BYTES: usize = 16 * 1024;
 
-/// The header-extension TLV type registry (MLP spec §5.3).
+/// The header-extension TLV type registry (MLP spec §6.3).
 pub mod tlv {
     /// `u64` — the update id this part belongs to.
     pub const UPDATE_ID: u8 = 0x01;
@@ -75,11 +75,11 @@ pub mod tlv {
     /// `u64` — input object sequence.
     pub const INPUT_SEQ: u8 = 0x0D;
     /// `u32` — the sender's cell grid size for the update's geometry.
-    pub const BLOCK_COUNT: u8 = 0x0E;
+    pub const CELL_COUNT: u8 = 0x0E;
     /// `u16` — measured processing cost reported by a hop.
     pub const COST_MS: u8 = 0x0F;
 
-    /// First reserved type: receivers skip these silently (MLP spec §5.3).
+    /// First reserved type: receivers skip these silently (MLP spec §6.3).
     pub const RESERVED_FIRST: u8 = 0x10;
     /// Last reserved type.
     pub const RESERVED_LAST: u8 = 0xEF;
@@ -104,7 +104,7 @@ pub mod tlv {
     }
 }
 
-/// The transport class field of a fragment (MLP spec §5.2).
+/// The transport class field of a fragment (MLP spec §6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum FragmentClass {
@@ -138,7 +138,7 @@ impl FragmentClass {
         self as u8
     }
 
-    /// The traffic class this fragment class maps to (MLP spec §4.1, §5.2).
+    /// The traffic class this fragment class maps to (MLP spec §4.1, §6.2).
     pub const fn traffic_class(self) -> TrafficClass {
         match self {
             Self::Control | Self::Path => TrafficClass::Control,
@@ -213,7 +213,7 @@ impl TrafficClass {
     }
 }
 
-/// The `flags` byte (MLP spec §5.2): bit 7 is reserved and must be zero.
+/// The `flags` byte (MLP spec §6.2): bit 7 is reserved and must be zero.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FragmentFlags(u8);
 
@@ -319,7 +319,7 @@ impl Priority {
 
     /// Whether this priority is reserved for control, cursor and feedback.
     ///
-    /// Media fragments may not use `0` or `1` (MLP spec §5.2): those are what the
+    /// Media fragments may not use `0` or `1` (MLP spec §6.2): those are what the
     /// pacer's reserved rate protects.
     pub const fn is_reserved_for_control(self) -> bool {
         self.0 <= 1
@@ -327,7 +327,7 @@ impl Priority {
 }
 
 /// The carrier a transport message was received from or will be sent on
-/// (MLP spec §5.1).
+/// (MLP spec §6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Carrier {
     /// WebSocket: exactly one fragment per message, 64 KiB payload cap.
@@ -641,9 +641,9 @@ impl HeaderExt {
         self.get_u64(tlv::INPUT_SEQ)
     }
 
-    /// The `BLOCK_COUNT` value.
+    /// The `CELL_COUNT` value.
     pub fn cell_count(&self) -> Option<u32> {
-        self.get_u32(tlv::BLOCK_COUNT)
+        self.get_u32(tlv::CELL_COUNT)
     }
 
     /// The `COST_MS` value.
@@ -692,7 +692,7 @@ impl HeaderExt {
     }
 }
 
-/// Media update metadata carried by the header extension (MLP spec §6.1).
+/// Media update metadata carried by the header extension (MLP spec §7.1).
 ///
 /// An *update* is the protocol's unit of media state: a self-contained one
 /// carries its whole surface, a chained one continues the surface the update
@@ -752,7 +752,7 @@ impl UpdateMeta {
     ///
     /// Both directions are checked: a TLV may not disagree with the decoded
     /// body, and the body may not disagree with the TLV. Disagreement is
-    /// `META_MISMATCH` (never "trust one of the two", MLP spec §5.3).
+    /// `META_MISMATCH` (never "trust one of the two", MLP spec §6.3).
     pub fn check_against(&self, live: &UpdateMeta) -> Result<(), RejectReason> {
         if self != live {
             return Err(RejectReason::MetaMismatch);
@@ -921,7 +921,7 @@ fn validate_header_fields(
 /// Parse a whole transport message into its fragments.
 ///
 /// Stream carriers accept 1..N concatenated fragments; datagram carriers
-/// accept exactly one (MLP spec §5.1, §5.4 step 3).
+/// accept exactly one (MLP spec §6.1, §6.4 step 3).
 pub fn parse_message(buf: &[u8], carrier: Carrier) -> Result<Vec<Fragment>, RejectReason> {
     let mut fragments = Vec::new();
     let mut offset = 0usize;

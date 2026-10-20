@@ -1,5 +1,5 @@
 //! Session continuity: resume, parking, rebase and the reconnect ladder
-//! (MLP spec §8.1–§7.4, D-5).
+//! (MLP spec §9.1–§8.4, D-5).
 //!
 //! The token *signature* is the edge's (HMAC-SHA256 with a Vault key); what
 //! lives here is every decision around it: claim validation, the park table
@@ -15,11 +15,11 @@ use super::MediaPath;
 use super::input::InputToken;
 use super::scheduler::PlanStartReason;
 
-/// `resume_ttl`: the resume TTL default 900 (MLP spec §8.1).
+/// `resume_ttl`: the resume TTL default 900 (MLP spec §9.1).
 pub const RESUME_TTL_SECONDS: u64 = 900;
-/// The park TTL floor (MLP spec §8.2).
+/// The park TTL floor (MLP spec §9.2).
 pub const PARK_TTL_FLOOR_SECONDS: u64 = 120;
-/// The park TTL ceiling (MLP spec §8.2).
+/// The park TTL ceiling (MLP spec §9.2).
 pub const PARK_TTL_CEIL_SECONDS: u64 = 900;
 /// The default park TTL when no outage target is configured.
 pub const PARK_TTL_DEFAULT_SECONDS: u64 = 300;
@@ -31,7 +31,7 @@ pub const RECONNECT_CAP_MS: u64 = 30_000;
 pub const RECONNECT_JITTER_MS: u64 = 250;
 /// Attempts after which the UI enters `Suspended`.
 pub const SUSPENDED_AFTER_ATTEMPTS: u32 = 6;
-/// Attempts after which `POST /api/session/bootstrap` is re-run (MLP spec §8.4).
+/// Attempts after which `POST /api/session/bootstrap` is re-run (MLP spec §9.4).
 pub const BOOTSTRAP_AFTER_ATTEMPTS: u32 = 3;
 
 /// Why a resume was rejected (`MediaResumeAck.reason`).
@@ -46,7 +46,7 @@ pub enum ResumeRejectReason {
     /// The token signature or shape is invalid.
     TokenInvalid,
     /// The token names another receiver or sender.
-    ViewerMismatch,
+    PeerMismatch,
     /// The receiver's epoch is older than the sender's.
     EpochStale,
     /// The receiver's epoch differs from the sender's but is not older.
@@ -63,7 +63,7 @@ impl ResumeRejectReason {
             Self::UnknownSession => "unknown_session",
             Self::TokenExpired => "token_expired",
             Self::TokenInvalid => "token_invalid",
-            Self::ViewerMismatch => "viewer_mismatch",
+            Self::PeerMismatch => "peer_mismatch",
             Self::EpochStale => "epoch_stale",
             Self::EpochMismatch => "epoch_mismatch",
             Self::ParkEvicted => "park_evicted",
@@ -80,7 +80,7 @@ impl ResumeRejectReason {
             "unknown_session" => Some(Self::UnknownSession),
             "token_expired" => Some(Self::TokenExpired),
             "token_invalid" => Some(Self::TokenInvalid),
-            "viewer_mismatch" => Some(Self::ViewerMismatch),
+            "peer_mismatch" => Some(Self::PeerMismatch),
             "epoch_stale" => Some(Self::EpochStale),
             "epoch_mismatch" => Some(Self::EpochMismatch),
             "park_evicted" => Some(Self::ParkEvicted),
@@ -89,13 +89,13 @@ impl ResumeRejectReason {
     }
 
     /// Whether the receiver should start a fresh media session for the same
-    /// receiver instead of giving up (MLP spec §8.3).
+    /// receiver instead of giving up (MLP spec §9.3).
     pub const fn starts_fresh_media_session(self) -> bool {
         matches!(self, Self::ParkEvicted | Self::EpochStale)
     }
 }
 
-/// The `claims` of a resume token (MLP spec §8.1).
+/// The `claims` of a resume token (MLP spec §9.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeClaims {
     /// Token format version; 2.
@@ -169,7 +169,7 @@ impl ResumeClaims {
             || self.viewer_id != binding.viewer_id
             || self.host_id != binding.host_id
         {
-            return Err(ResumeRejectReason::ViewerMismatch);
+            return Err(ResumeRejectReason::PeerMismatch);
         }
         Ok(())
     }
@@ -180,7 +180,7 @@ impl ResumeClaims {
     }
 }
 
-/// The sender's held per-receiver media state across a park (MLP spec §8.2).
+/// The sender's held per-receiver media state across a park (MLP spec §9.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeldViewerState {
     /// The chain epoch.
@@ -247,7 +247,7 @@ pub enum ResumeAction {
     },
 }
 
-/// The sender's answer to a `MediaResume` (MLP spec §8.3).
+/// The sender's answer to a `MediaResume` (MLP spec §9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeOutcome {
     /// The `MediaResumeAck` the peer receives.
@@ -295,7 +295,7 @@ pub struct ResumeRequest {
 
 /// Decide the sender's answer to a resume and mutate the held state.
 ///
-/// The rules are MLP spec §8.2/§7.3:
+/// The rules are MLP spec §9.2/§8.3:
 /// * a mismatched or expired token never attaches;
 /// * an epoch mismatch attaches but starts an anchor plan (`epoch_mismatch`);
 /// * an evicted park starts a fresh media session for the same receiver;
@@ -344,7 +344,7 @@ pub fn decide_resume(
     let mut anchor_plan_started = false;
     if request.viewer_epoch != state.epoch {
         // The receiver's canvas trust is reset: everything the sender sent is
-        // suspect (MLP spec §6.1). The cells are kept; only trust is lost.
+        // suspect (MLP spec §7.1). The cells are kept; only trust is lost.
         anchor_plan_started = true;
         state.epoch = state.epoch.max(request.viewer_epoch);
         actions.push(ResumeAction::StartAnchorPlan {
@@ -437,7 +437,7 @@ pub struct ParkEntry {
     pub epoch: u32,
 }
 
-/// Park policy: TTLs derived from the outage target (MLP spec §8.2, N-4).
+/// Park policy: TTLs derived from the outage target (MLP spec §9.2, N-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkPolicy {
     /// `park_ttl = clamp(2 × outage_target + 60 s, 120, 900)`.
@@ -586,7 +586,7 @@ impl ReconnectStage {
     }
 }
 
-/// A terminal condition: the ladder must stop instead of retrying (MLP spec §8.4).
+/// A terminal condition: the ladder must stop instead of retrying (MLP spec §9.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalReason {
     /// 401/403 from bootstrap or the handshake.
@@ -603,7 +603,7 @@ pub enum TerminalReason {
     OperatorAction,
 }
 
-/// The receiver's reconnect ladder (MLP spec §8.4): RTT-relative and unbounded.
+/// The receiver's reconnect ladder (MLP spec §9.4): RTT-relative and unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ReconnectLadder {
     /// `max(500 ms, 1 × rtt_smoothed)`.
@@ -666,7 +666,7 @@ impl ReconnectLadder {
 
     /// Whether the ladder keeps retrying for a terminal reason.
     pub fn retries_for(&self, _reason: TerminalReason) -> bool {
-        // Every terminal reason means "do not retry" (MLP spec §8.4).
+        // Every terminal reason means "do not retry" (MLP spec §9.4).
         false
     }
 }
@@ -739,7 +739,7 @@ mod tests {
         wrong_viewer.viewer_id = "someone-else".into();
         assert_eq!(
             wrong_viewer.validate_at(1_500, &binding()),
-            Err(ResumeRejectReason::ViewerMismatch)
+            Err(ResumeRejectReason::PeerMismatch)
         );
     }
 
@@ -760,7 +760,7 @@ mod tests {
             ResumeRejectReason::UnknownSession,
             ResumeRejectReason::TokenExpired,
             ResumeRejectReason::TokenInvalid,
-            ResumeRejectReason::ViewerMismatch,
+            ResumeRejectReason::PeerMismatch,
             ResumeRejectReason::EpochStale,
             ResumeRejectReason::EpochMismatch,
             ResumeRejectReason::ParkEvicted,
@@ -807,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_blocks_start_a_plan_on_resume() {
+    fn pending_cells_start_a_plan_on_resume() {
         let mut state = HeldViewerState {
             epoch: 3,
             pending_cells: 12,
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn t4_flap_fits_inside_the_park_ttl() {
-        // Design §7.4: 5 × 10 s outages need ≈ 60 s of ladder time at 2 s RTT,
+        // Design §8.4: 5 × 10 s outages need ≈ 60 s of ladder time at 2 s RTT,
         // so park_ttl ≥ 120 s covers it.
         let ladder = ReconnectLadder::new(2_000.0);
         let ladder_time = ladder.cumulative_ms(6);

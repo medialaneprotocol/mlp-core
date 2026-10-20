@@ -1,4 +1,4 @@
-//! Deterministic risky-link simulator (MLP spec §12).
+//! Deterministic risky-link simulator (MLP spec §10).
 //!
 //! [`LossyLink`] carries [`Transmits`](crate::Transmit) between two endpoints
 //! with per-direction rate limits, propagation delay, jitter, loss (uniform or
@@ -53,7 +53,7 @@ impl Tier {
     }
 }
 
-/// The jitter distribution (MLP spec §12).
+/// The jitter distribution (MLP spec §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum JitterDist {
     /// Gaussian via Box–Muller.
@@ -79,7 +79,7 @@ impl Outage {
     }
 }
 
-/// The link profile (MLP spec §12).
+/// The link profile (MLP spec §10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkProfile {
     /// Round-trip time in ms.
@@ -220,7 +220,7 @@ impl LinkProfile {
     /// Whether a message of `message_len` bytes fits the carrier.
     ///
     /// The profile's `mtu_bytes` is the payload budget; the MLP fixed header
-    /// and header extension travel on top of it (MLP spec §5.2), so the link
+    /// and header extension travel on top of it (MLP spec §6.2), so the link
     /// admits `mtu_bytes + FRAMING_ALLOWANCE_BYTES`.
     pub fn admits(&self, message_len: usize) -> bool {
         message_len <= self.mtu_bytes as usize + FRAMING_ALLOWANCE_BYTES

@@ -1,4 +1,4 @@
-//! Sans-IO media core for the MLP v1 media lane (MLP spec §5–§10).
+//! Sans-IO media core for the MLP v1 media lane (MLP spec §6–§12).
 //!
 //! This module is the single home of media-lane *policy*: the byte-level PDU
 //! codec ([`pdu`]), object assembly ([`object`]), the bandwidth estimator
@@ -14,7 +14,7 @@
 //!
 //! # Shared value types
 //!
-//! The class bodies of MLP spec §6.2/§6.3 are plain Rust structs here; drivers
+//! The class bodies of MLP spec §7.2/§7.3 are plain Rust structs here; drivers
 //! carry them across the wire with the service's protobuf definitions. Keeping
 //! them dependency-free is what lets the deterministic simulator in
 //! [`crate::testing`] exercise every decision without a runtime.
@@ -48,10 +48,10 @@ pub use sender::{
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum concurrent media viewers per sender (MLP spec §7.5.5).
+/// Maximum concurrent media receivers per sender (MLP spec §8).
 pub const MAX_MEDIA_VIEWERS_PER_HOST: usize = 8;
 
-/// Capability names carried by `MediaHello`/`MediaHelloAck` (MLP spec §6.3).
+/// Capability names carried by `MediaHello`/`MediaHelloAck` (MLP spec §7.3).
 pub mod capability {
     /// Anchor updates may be applied onto any held state.
     pub const ANCHOR: &str = "anchor";
@@ -69,7 +69,7 @@ pub mod capability {
     pub const DUPE: &str = "dupe";
 }
 
-/// Hop identifiers for `MediaHopReport` (MLP spec §6.2).
+/// Hop identifiers for `MediaHopReport` (MLP spec §7.2).
 ///
 /// The numbers are extensible: a hop that is not one of these reports
 /// itself as an unknown hop rather than borrowing another's number.
@@ -84,7 +84,7 @@ pub mod hop {
     pub const TURN: u32 = 4;
 }
 
-/// Media carrier paths (MLP spec §6.3, §6.8).
+/// Media carrier paths (MLP spec §7.3, §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[repr(u8)]
 pub enum MediaPath {
@@ -175,7 +175,7 @@ impl ControlKind {
     }
 }
 
-/// `MediaHello` (MLP spec §6.3): the first object a media lane sends.
+/// `MediaHello` (MLP spec §7.3): the first object a media lane sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaHello {
     /// Protocol version; 1.
@@ -200,7 +200,7 @@ pub struct MediaHello {
     pub start_epoch_ms: u64,
 }
 
-/// `MediaHelloAck` (MLP spec §6.3).
+/// `MediaHelloAck` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaHelloAck {
     /// Protocol version; 1.
@@ -225,7 +225,7 @@ pub struct MediaHelloAck {
     pub media_unsupported_reason: Option<MediaUnsupportedReason>,
 }
 
-/// `MediaResume` (MLP spec §6.3): what the receiver held when the lane died.
+/// `MediaResume` (MLP spec §7.3): what the receiver held when the lane died.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaResume {
     /// Opaque resume token; never parsed by a browser.
@@ -248,7 +248,7 @@ pub struct MediaResume {
     pub dc_transport_id: String,
 }
 
-/// `MediaResumeAck` (MLP spec §6.3).
+/// `MediaResumeAck` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaResumeAck {
     /// Whether the parked state was attached.
@@ -269,7 +269,7 @@ pub struct MediaResumeAck {
     pub anchor_plan_started: bool,
 }
 
-/// `MediaLaneState` (MLP spec §6.3).
+/// `MediaLaneState` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaLaneState {
     /// Lane state kind.
@@ -280,7 +280,7 @@ pub struct MediaLaneState {
     pub detail: String,
 }
 
-/// `MediaAnchorPlan` (MLP spec §6.3, §6.6).
+/// `MediaAnchorPlan` (MLP spec §7.3, §7.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAnchorPlan {
     /// Plan identifier, monotone per receiver.
@@ -288,12 +288,12 @@ pub struct MediaAnchorPlan {
     /// Estimated updates to finish the plan.
     pub total_frames_estimate: u32,
     /// Cells in the plan.
-    pub total_blocks: u32,
-    /// Plan priority (MLP spec §7.3.1).
+    pub total_cells: u32,
+    /// Plan priority (MLP spec §8).
     pub priority: u8,
 }
 
-/// `MediaClose` (MLP spec §6.3).
+/// `MediaClose` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaClose {
     /// Close code, see [`MediaCloseCode`].
@@ -304,7 +304,7 @@ pub struct MediaClose {
     pub park: bool,
 }
 
-/// `MediaError` (MLP spec §6.3).
+/// `MediaError` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaErrorBody {
     /// Numeric code, see [`MediaErrorCode`].
@@ -315,7 +315,7 @@ pub struct MediaErrorBody {
     pub detail: String,
 }
 
-/// `MediaPathChange` (MLP spec §6.3, §6.8).
+/// `MediaPathChange` (MLP spec §7.3, §7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaPathChange {
     /// Previous path.
@@ -383,7 +383,7 @@ impl MediaControlObject {
         )
     }
 
-    /// Validate the body invariants of MLP spec §6.2/§5.7.
+    /// Validate the body invariants of MLP spec §7.2/§6.7.
     pub fn validate(&self) -> Result<(), RejectReason> {
         match self {
             Self::Hello(hello) => {
@@ -408,7 +408,7 @@ impl MediaControlObject {
                 Ok(())
             }
             Self::AnchorPlan(plan) => {
-                if plan.total_blocks == 0 || plan.priority > 7 {
+                if plan.total_cells == 0 || plan.priority > 7 {
                     return Err(RejectReason::BodyInvalid);
                 }
                 Ok(())
@@ -418,7 +418,7 @@ impl MediaControlObject {
     }
 }
 
-/// `MediaAck` (MLP spec §6.2): selective bitmap over a 64-update window.
+/// `MediaAck` (MLP spec §7.2): selective bitmap over a 64-update window.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct MediaAck {
     /// Highest applied update id; `0` means nothing applied yet.
@@ -428,9 +428,9 @@ pub struct MediaAck {
     /// The receiver's chain epoch.
     pub chain_epoch: u32,
     /// The receiver's cell grid size.
-    pub applied_block_count: u32,
+    pub applied_cell_count: u32,
     /// The receiver's own count of cells it believes stale.
-    pub stale_blocks: u32,
+    pub stale_cells: u32,
     /// The receiver's belief; the sender's accounting is authoritative.
     pub converged: bool,
     /// Measured render latency.
@@ -444,7 +444,7 @@ pub struct MediaAck {
 }
 
 impl MediaAck {
-    /// Validate the ack bitmap and count rules (MLP spec §6.2).
+    /// Validate the ack bitmap and count rules (MLP spec §7.2).
     pub fn validate(&self) -> Result<(), RejectReason> {
         // Bit i may be set only when highest_applied_update_id >= i.
         let mut bits = self.ack_bitmap;
@@ -458,7 +458,7 @@ impl MediaAck {
             bits >>= 1;
             i += 1;
         }
-        if self.stale_blocks > self.applied_block_count {
+        if self.stale_cells > self.applied_cell_count {
             return Err(RejectReason::AckBadCount);
         }
         if !self.has_render_latency_ms && self.render_latency_ms != 0.0 {
@@ -493,7 +493,7 @@ impl MediaAck {
     }
 }
 
-/// `ProbeEcho` (MLP spec §6.2).
+/// `ProbeEcho` (MLP spec §7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProbeEcho {
     /// The probe object id.
@@ -506,7 +506,7 @@ pub struct ProbeEcho {
     pub payload_bytes: u32,
 }
 
-/// `MediaProbe` (MLP spec §6.2, §6.2.6).
+/// `MediaProbe` (MLP spec §7.2, §7.2.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaProbe {
     /// Probe identifier.
@@ -517,7 +517,7 @@ pub struct MediaProbe {
     pub send_epoch_ms: u64,
 }
 
-/// `MediaFeedback` (MLP spec §6.2): the receiver's only quality channel.
+/// `MediaFeedback` (MLP spec §7.2): the receiver's only quality channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaFeedback {
     /// The receiver's measured RTT (clamped 1..60000).
@@ -595,7 +595,7 @@ impl Default for MediaFeedback {
 impl MediaFeedback {
     /// Goodput in bits per second, or `None` for an empty window.
     ///
-    /// Payload bytes only, as the estimator requires (MLP spec §7.2.2).
+    /// Payload bytes only, as the estimator requires (MLP spec §8).
     pub fn goodput_bps(&self) -> Option<u64> {
         if self.window_ms == 0 {
             return None;
@@ -603,7 +603,7 @@ impl MediaFeedback {
         Some(self.received_bytes.saturating_mul(8_000) / self.window_ms)
     }
 
-    /// Delivered ratio over the report window (MLP spec §7.2.2).
+    /// Delivered ratio over the report window (MLP spec §8).
     pub fn delivered_ratio(&self) -> Option<f64> {
         let attempted = self.received_objects + self.lost_objects;
         if attempted == 0 {
@@ -637,7 +637,7 @@ impl MediaFeedback {
     }
 }
 
-/// `MediaHopReport` (MLP spec §6.2, D-16): what an intermediary hop dropped.
+/// `MediaHopReport` (MLP spec §7.2, D-16): what an intermediary hop dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaHopReport {
     /// `1` = intermediary, `2` = edge; extensible, see [`hop`].
@@ -660,7 +660,7 @@ pub struct MediaHopReport {
     pub backpressure_ms: u32,
 }
 
-/// `MediaCursor` (MLP spec §6.2): unordered, latest-wins, never retransmitted.
+/// `MediaCursor` (MLP spec §7.2): unordered, latest-wins, never retransmitted.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaCursor {
     /// Cursor x in screen cells.
@@ -682,7 +682,7 @@ pub struct MediaCursor {
 }
 
 impl MediaCursor {
-    /// Validate the cursor body rules (MLP spec §6.2).
+    /// Validate the cursor body rules (MLP spec §7.2).
     pub fn validate(&self) -> Result<(), RejectReason> {
         if self.shape_rgba.len() > 8192 {
             return Err(RejectReason::BodyInvalid);
@@ -726,12 +726,12 @@ mod tests {
     }
 
     #[test]
-    fn ack_stale_blocks_above_applied_count_is_rejected() {
+    fn ack_stale_cells_above_applied_count_is_rejected() {
         let ack = MediaAck {
             highest_applied_update_id: 3,
             ack_bitmap: 0b1,
-            applied_block_count: 4,
-            stale_blocks: 5,
+            applied_cell_count: 4,
+            stale_cells: 5,
             ..MediaAck::default()
         };
         assert_eq!(ack.validate(), Err(RejectReason::AckBadCount));

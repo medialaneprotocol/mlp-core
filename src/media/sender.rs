@@ -1,4 +1,4 @@
-//! The media-lane sender machine (sender → receiver direction, MLP spec §6.1, §6).
+//! The media-lane sender machine (sender → receiver direction, MLP spec §7.1, §7).
 //!
 //! [`MediaSenderMachine`] owns the outbound policy of one `(sender, receiver)`
 //! media session: update chunking into MLP objects, object ids, the priority
@@ -15,7 +15,7 @@ use crate::action::Transmit;
 use crate::state_machine::StateMachine;
 
 use super::bwe::{BandwidthEstimator, BweConfig, Estimate};
-use super::cells::{BlockAccounting, BlockAccountingConfig, BlockGrid};
+use super::cells::{CellAccounting, CellAccountingConfig, CellGrid};
 use super::error::RejectReason;
 use super::input::InputToken;
 use super::lifecycle::{
@@ -44,7 +44,7 @@ pub enum MediaSenderEvent {
     ///
     /// The plan's bands are not events: each band is a update the driver pulls
     /// through [`MediaSenderMachine::plan_next_frame`], and the plan advances by
-    /// exactly the bands it encoded (MLP spec §6.2). A plan that advanced on a
+    /// exactly the bands it encoded (MLP spec §7.2). A plan that advanced on a
     /// poll would skip the cells of every band it did not paint.
     PlanStarted {
         /// Plan id.
@@ -153,7 +153,7 @@ impl SenderStats {
     }
 }
 
-/// Sender policy constants (MLP spec §7.3–§6.6).
+/// Sender policy constants (MLP spec §8.3–§7.6).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MediaSenderConfig {
     /// The carrier this sender writes to.
@@ -188,15 +188,15 @@ pub struct MediaSenderConfig {
     /// Scheduler policy.
     pub scheduler: SchedulerConfig,
     /// Cell accounting policy.
-    pub accounting: BlockAccountingConfig,
+    pub accounting: CellAccountingConfig,
 }
 
 impl MediaSenderConfig {
     /// A configuration for a carrier and geometry.
-    pub fn new(carrier: Carrier, grid: BlockGrid) -> Self {
-        let accounting = BlockAccountingConfig {
+    pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
+        let accounting = CellAccountingConfig {
             datagram: carrier.is_datagram(),
-            ..BlockAccountingConfig::default()
+            ..CellAccountingConfig::default()
         };
         Self {
             carrier,
@@ -299,12 +299,12 @@ pub enum EnqueueOutcome {
     },
 }
 
-/// Path-selection policy (MLP spec §7.8, S2): the hysteresis that decides when a
+/// Path-selection policy (MLP spec §8, S2): the hysteresis that decides when a
 /// media session moves between carriers.
 ///
 /// It is pure policy on top of measured goodput — the carriers themselves
 /// (WebSocket, `rm.media`/`rm.repair` data channels) are the adapters' business
-/// (W10). Every rule of §6.8 lives here, so the driver carries no thresholds:
+/// (W10). Every rule of §7 lives here, so the driver carries no thresholds:
 ///
 /// * promotion requires `goodput(dc) >= 1.2 × goodput(ws)` sustained for
 ///   `3 × rtt_min`;
@@ -355,7 +355,7 @@ pub struct PathSwitch {
     pub reason: &'static str,
 }
 
-/// The path-selection state machine (MLP spec §7.8).
+/// The path-selection state machine (MLP spec §8).
 #[derive(Debug, Clone)]
 pub struct PathSelector {
     config: PathSelectionConfig,
@@ -417,7 +417,7 @@ impl PathSelector {
     /// Feed one goodput sample for a path.
     ///
     /// Returns a switch when the hysteresis rules fire. `plan_active` and
-    /// `pulse_active` suppress switching entirely (§6.8: never switch during an
+    /// `pulse_active` suppress switching entirely (§7: never switch during an
     /// anchor plan or an input pulse).
     pub fn on_goodput(
         &mut self,
@@ -634,11 +634,11 @@ impl OutboundObject {
         self.next_fragment >= self.fragment_count
     }
 
-    /// Whether every cell this object carries is covered by `plan_blocks`.
-    fn superseded_by(&self, plan_blocks: &std::collections::HashSet<u32>) -> bool {
+    /// Whether every cell this object carries is covered by `plan_cells`.
+    fn superseded_by(&self, plan_cells: &std::collections::HashSet<u32>) -> bool {
         self.update_id.is_some()
             && !self.cells.is_empty()
-            && self.cells.iter().all(|cell| plan_blocks.contains(cell))
+            && self.cells.iter().all(|cell| plan_cells.contains(cell))
     }
 }
 
@@ -649,7 +649,7 @@ pub struct MediaSenderMachine {
     estimator: BandwidthEstimator,
     pacer: MediaPacer,
     scheduler: Scheduler,
-    accounting: BlockAccounting,
+    accounting: CellAccounting,
     lane: LaneLifecycle,
     objects: Vec<OutboundObject>,
     next_object_id: u32,
@@ -667,7 +667,7 @@ pub struct MediaSenderMachine {
 
 impl MediaSenderMachine {
     /// Create a sender for one receiver.
-    pub fn new(config: MediaSenderConfig, grid: BlockGrid, now: Instant) -> Self {
+    pub fn new(config: MediaSenderConfig, grid: CellGrid, now: Instant) -> Self {
         let estimator = BandwidthEstimator::new(config.bwe);
         let mut pacer = MediaPacer::with_config(
             PacerConfig {
@@ -677,7 +677,7 @@ impl MediaSenderMachine {
             now,
         );
         pacer.set_rtt(Duration::from_millis(50));
-        let accounting = BlockAccounting::new(grid, config.accounting);
+        let accounting = CellAccounting::new(grid, config.accounting);
         let scheduler = Scheduler::new(config.scheduler, config.plan);
         let estimate = estimator.estimate();
         Self {
@@ -748,12 +748,12 @@ impl MediaSenderMachine {
     }
 
     /// Per-receiver cell accounting.
-    pub fn accounting(&self) -> &BlockAccounting {
+    pub fn accounting(&self) -> &CellAccounting {
         &self.accounting
     }
 
     /// Per-receiver cell accounting, mutable.
-    pub fn accounting_mut(&mut self) -> &mut BlockAccounting {
+    pub fn accounting_mut(&mut self) -> &mut CellAccounting {
         &mut self.accounting
     }
 
@@ -791,7 +791,7 @@ impl MediaSenderMachine {
     }
 
     /// A geometry change: resets the grid, bumps the epoch and demands a plan.
-    pub fn set_grid(&mut self, grid: BlockGrid, now: Instant) -> bool {
+    pub fn set_grid(&mut self, grid: CellGrid, now: Instant) -> bool {
         if grid.geometry_key() == self.accounting.grid().geometry_key() {
             return false;
         }
@@ -824,7 +824,7 @@ impl MediaSenderMachine {
         self.pending_plan_reasons.push(reason);
     }
 
-    /// Enqueue a media update (MLP spec §6.1, §6.3).
+    /// Enqueue a media update (MLP spec §7.1, §7.3).
     ///
     /// The sender allocates the update id, chains `update_base` from the last
     /// emitted update and attaches the update TLVs; the payload of each chunk is
@@ -842,7 +842,7 @@ impl MediaSenderMachine {
         }
         let estimate = self.last_estimate;
         // The encoder must produce chunks that fit one object per the budget,
-        // and never need segmentation on a datagram carrier (MLP spec §6.1).
+        // and never need segmentation on a datagram carrier (MLP spec §7.1).
         for chunk in &update.chunks {
             let cap = if self.config.carrier.is_datagram() {
                 estimate
@@ -886,7 +886,7 @@ impl MediaSenderMachine {
         let update_id = self.next_update_id;
         // Chain on what the receiver confirmed (`last_applied_update_id`), not on
         // the last update this sender emitted: a update the receiver never applied
-        // cannot be the base of the next delta (MLP spec §6.1).
+        // cannot be the base of the next delta (MLP spec §7.1).
         let update_base = self.accounting.last_applied_update_id();
         let session_ms = self.session_ms(now);
         let part_count = update.chunks.len() as u16;
@@ -904,7 +904,7 @@ impl MediaSenderMachine {
                 send_epoch_ms: session_ms,
             };
             let mut ext = meta.to_ext();
-            let _ = ext.push_u32(tlv::BLOCK_COUNT, self.accounting.grid().cells());
+            let _ = ext.push_u32(tlv::CELL_COUNT, self.accounting.grid().cells());
             let mut flags = FragmentFlags::NONE;
             if update.anchor {
                 flags = flags.union(FragmentFlags::ANCHOR);
@@ -1279,7 +1279,7 @@ impl MediaSenderMachine {
     ///
     /// A park close holds the receiver's state; a terminal close disables the
     /// lane. Both leave the object queue untouched: the caller decides whether
-    /// to drain it (a park keeps the pending set growing, §7.2).
+    /// to drain it (a park keeps the pending set growing, §8.2).
     pub fn on_remote_close(&mut self, close: &MediaClose, now: Instant) -> Vec<MediaSenderEvent> {
         let mut events = Vec::new();
         let session_ms = self.session_ms(now);
@@ -1302,7 +1302,7 @@ impl MediaSenderMachine {
     }
 
     /// Check the plan ladder: restart an overdue plan, and start a new one when
-    /// the accounting demands it (MLP spec §7.6).
+    /// the accounting demands it (MLP spec §8).
     ///
     /// A running plan's bands are pulled by the update path alone
     /// ([`Self::plan_next_frame`] → `Scheduler::schedule`): a band is only a
@@ -1349,7 +1349,7 @@ impl MediaSenderMachine {
             let cell_bytes = self
                 .config
                 .scheduler
-                .block_bytes_for(self.accounting.grid())
+                .cell_bytes_for(self.accounting.grid())
                 .max(1);
             let updates_estimate = cells
                 .len()
@@ -1395,7 +1395,7 @@ impl MediaSenderMachine {
         now: Instant,
     ) -> ScheduleDecision {
         let session_ms = self.session_ms(now);
-        let due = self.accounting.due_blocks(session_ms);
+        let due = self.accounting.due_cells(session_ms);
         let budget = UpdateBudget {
             bytes: self.last_estimate.budget_bytes,
             max_object_bytes: self.last_estimate.max_object_bytes,
@@ -1927,7 +1927,7 @@ impl MediaSenderMachine {
     }
 }
 
-/// The update kind's default MLP priority (MLP spec §7.3.1, §6.3.5).
+/// The update kind's default MLP priority (MLP spec §8, §7.3.5).
 impl UpdateKind {
     /// `6` for interactive media.
     pub const fn mlp_priority_hint(self) -> u8 {
@@ -2027,7 +2027,7 @@ mod tests {
     use super::*;
 
     fn sender(carrier: Carrier) -> MediaSenderMachine {
-        let grid = BlockGrid::with_block_size(320, 240, 64);
+        let grid = CellGrid::with_cell_size(320, 240, 64);
         MediaSenderMachine::new(MediaSenderConfig::new(carrier, grid), grid, Instant::now())
     }
 
@@ -2189,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_start_on_stuck_blocks_and_survive_polls() {
+    fn plans_start_on_stuck_cells_and_survive_polls() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
         let mut session_ms = 0u64;
@@ -2219,24 +2219,24 @@ mod tests {
     }
 
     #[test]
-    fn a_plans_bands_are_pulled_by_frames_and_cover_its_block_list() {
+    fn a_plans_bands_are_pulled_by_frames_and_cover_its_cell_list() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
-        let changed = sender.set_grid(BlockGrid::with_block_size(640, 480, 64), now);
+        let changed = sender.set_grid(CellGrid::with_cell_size(640, 480, 64), now);
         assert!(changed, "a geometry change demands a plan");
         let events = sender.poll_plans(now);
-        let plan_blocks = events
+        let plan_cells = events
             .iter()
             .find_map(|event| match event {
                 MediaSenderEvent::PlanStarted { cells, .. } => Some(*cells),
                 _ => None,
             })
             .expect("a geometry change starts a plan");
-        assert!(plan_blocks > 1, "the plan covers the grid");
+        assert!(plan_cells > 1, "the plan covers the grid");
         // Polling the plan ladder — what a timer, an ack report and a feedback
         // report each do — must not take a band: a band is a update, and only
         // the update path may pull one.
-        for _ in 0..(plan_blocks as usize * 4) {
+        for _ in 0..(plan_cells as usize * 4) {
             assert!(sender.poll_plans(now).is_empty(), "a poll takes no band");
         }
         assert!(
@@ -2256,18 +2256,18 @@ mod tests {
             );
             covered.extend(&decision.cells);
             bands += 1;
-            assert!(bands <= plan_blocks, "every band carries cells");
+            assert!(bands <= plan_cells, "every band carries cells");
         }
         assert_eq!(
             covered.len() as u32,
-            plan_blocks,
+            plan_cells,
             "the updates cover the plan's cell count"
         );
         covered.sort_unstable();
         covered.dedup();
         assert_eq!(
             covered.len() as u32,
-            plan_blocks,
+            plan_cells,
             "no planned cell is skipped or sent twice"
         );
         let (started, completed, overdue) = sender.scheduler().plans().counters();
@@ -2316,7 +2316,7 @@ mod tests {
     fn geometry_change_bumps_the_epoch_and_requests_a_plan() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
-        let changed = sender.set_grid(BlockGrid::with_block_size(640, 480, 64), now);
+        let changed = sender.set_grid(CellGrid::with_cell_size(640, 480, 64), now);
         assert!(changed);
         assert_eq!(sender.accounting().epoch(), 1);
         let events = sender.poll_plans(now);

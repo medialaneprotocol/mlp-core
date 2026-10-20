@@ -55,3 +55,16 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 too_many_arguments = "allow"
+# The suites build their fixtures by assigning into a defaulted value: the
+# assignment is the point, and the alternative is a longer literal.
+field_reassign_with_default = "allow"
+# The suites compare values with their own type on both sides.
+useless_conversion = "allow"
+assertions_on_constants = "allow"
+bool_assert_comparison = "allow"
+# A borrowed expression the compiler dereferences for us.
+needless_borrow = "allow"
+# A counter that a loop uses as its index.
+needless_range_loop = "allow"
+# A counter the loop body names.
+explicit_counter_loop = "allow"
