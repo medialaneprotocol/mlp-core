@@ -102,6 +102,53 @@ pub mod tlv {
     pub const fn is_known(kind: u8) -> bool {
         kind >= UPDATE_ID && kind <= COST_MS
     }
+
+    /// The registry's name for a type, when the registry names it.
+    ///
+    /// The names are the specification's own names for the TLVs, and they are
+    /// what the tool, the metrics and the documentation all use.
+    pub const fn name(kind: u8) -> Option<&'static str> {
+        match kind {
+            UPDATE_ID => Some("UPDATE_ID"),
+            UPDATE_BASE => Some("UPDATE_BASE"),
+            PART => Some("PART"),
+            UPDATE_BYTES => Some("UPDATE_BYTES"),
+            CHAIN_EPOCH => Some("CHAIN_EPOCH"),
+            REFLECTS_INPUT_SEQ => Some("REFLECTS_INPUT_SEQ"),
+            SEND_EPOCH_MS => Some("SEND_EPOCH_MS"),
+            DEADLINE_EPOCH_MS => Some("DEADLINE_EPOCH_MS"),
+            ECHO_OF_OBJECT_ID => Some("ECHO_OF_OBJECT_ID"),
+            BUDGET_BYTES => Some("BUDGET_BYTES"),
+            PACE_BPS => Some("PACE_BPS"),
+            PATH_HINT => Some("PATH_HINT"),
+            INPUT_SEQ => Some("INPUT_SEQ"),
+            CELL_COUNT => Some("CELL_COUNT"),
+            COST_MS => Some("COST_MS"),
+            _ => None,
+        }
+    }
+
+    /// The type a registry name names, when the registry names it.
+    pub fn from_name(name: &str) -> Option<u8> {
+        match name {
+            "UPDATE_ID" => Some(UPDATE_ID),
+            "UPDATE_BASE" => Some(UPDATE_BASE),
+            "PART" => Some(PART),
+            "UPDATE_BYTES" => Some(UPDATE_BYTES),
+            "CHAIN_EPOCH" => Some(CHAIN_EPOCH),
+            "REFLECTS_INPUT_SEQ" => Some(REFLECTS_INPUT_SEQ),
+            "SEND_EPOCH_MS" => Some(SEND_EPOCH_MS),
+            "DEADLINE_EPOCH_MS" => Some(DEADLINE_EPOCH_MS),
+            "ECHO_OF_OBJECT_ID" => Some(ECHO_OF_OBJECT_ID),
+            "BUDGET_BYTES" => Some(BUDGET_BYTES),
+            "PACE_BPS" => Some(PACE_BPS),
+            "PATH_HINT" => Some(PATH_HINT),
+            "INPUT_SEQ" => Some(INPUT_SEQ),
+            "CELL_COUNT" => Some(CELL_COUNT),
+            "COST_MS" => Some(COST_MS),
+            _ => None,
+        }
+    }
 }
 
 /// The transport class field of a fragment (MLP spec §6.2).

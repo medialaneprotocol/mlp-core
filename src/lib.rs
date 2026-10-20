@@ -51,6 +51,23 @@
 //! | [`error`] | the rejection vocabulary |
 //! | [`testing`] | the deterministic harness and the lossy-link simulator |
 //!
+//! # The command-line tool
+//!
+//! The crate also ships `mlp-core`, the protocol's command-line tool: it
+//! builds and reads fragments, assembles objects, builds and reads the
+//! receiver's acknowledgement, prints the protocol's hard limits, and runs the
+//! published conformance corpus against a build. It lives behind the `cli`
+//! feature, so the library's default dependency closure stays what it is.
+//!
+//! ```
+//! # #[cfg(feature = "cli")]
+//! # {
+//! let args = vec!["mlp-core".to_string(), "limits".to_string(), "--json".to_string()];
+//! let outcome = mlp_core::cli::run(&args);
+//! assert_eq!(outcome.code, 0);
+//! # }
+//! ```
+//!
 //! # Example
 //!
 //! ```
@@ -75,6 +92,8 @@
 //! ```
 
 pub mod action;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod media;
 pub mod state_machine;
 #[cfg(any(test, feature = "testing"))]
