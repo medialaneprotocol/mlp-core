@@ -217,6 +217,14 @@ impl InternalState {
     }
 }
 
+/// The headroom a probe is paced above the estimate (MLP spec §6.2.6).
+///
+/// A probe is offered at `1.25 ×` the estimate so it can find out whether
+/// the link carries more than the sender is sending. The rate it *tests* is
+/// therefore the estimate itself, and that is the rate a delivered probe may
+/// confirm.
+pub const PROBE_STEP_HEADROOM: f64 = 1.25;
+
 /// The bandwidth estimator (MLP spec §6.2).
 ///
 /// Deterministic: every measurement derives from injected [`Instant`]s and the
@@ -698,8 +706,22 @@ impl BandwidthEstimator {
     pub fn on_probe_result(&mut self, outcome: &ProbeOutcome, _now: Instant) {
         self.probe_pending = None;
         if outcome.delivered {
-            let raised = outcome.probe_rate_bps as f64 * outcome.delivered_ratio;
-            self.btlbw_bps = self.btlbw_bps.max(raised).min(self.ceiling());
+            // A probe is paced at `min(1.25 × btlbw, 1.25 × pace)` (MLP spec
+            // §6.2.6): it is a **step above** the estimate, offered to find
+            // out whether the link carries more than the sender is sending.
+            // What a delivered probe proves is that the link carried the
+            // step, so the estimate it may be raised to is the step's
+            // **base** — the rate the probe tested — and not the step
+            // itself. Using the step would ratchet the estimate by the
+            // probe's own headroom every time a probe came back, and a
+            // healthy link would climb to the ceiling on its own.
+            //
+            // The estimate grows through the goodput (§6.2.3), which is a
+            // measurement of what the link actually delivered; the probe
+            // confirms the rate the sender is already offering.
+            let base =
+                outcome.probe_rate_bps as f64 * outcome.delivered_ratio / PROBE_STEP_HEADROOM;
+            self.btlbw_bps = self.btlbw_bps.max(base).min(self.ceiling());
         } else {
             self.btlbw_bps *= 0.9;
             self.probes_failed += 1;
@@ -1332,5 +1354,49 @@ mod tests {
             estimator.estimate()
         };
         assert_eq!(run(), run());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// A delivered probe confirms the rate it tested, not the step it was
+    /// paced at: the estimate must not ratchet on a healthy link.
+    #[test]
+    fn a_delivered_probe_does_not_ratchet_the_estimate() {
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.btlbw_bps = 1_000_000.0;
+        estimator.pace_bps = 1_000_000.0;
+        // The probe is paced at the step above the estimate.
+        let probe_rate = (1.25 * estimator.btlbw_bps) as u64;
+        estimator.on_probe_result(
+            &ProbeOutcome {
+                delivered: true,
+                delivered_ratio: 1.0,
+                probe_rate_bps: probe_rate,
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            estimator.btlbw_bps, 1_000_000.0,
+            "the estimate is confirmed, not inflated by the probe's headroom"
+        );
+    }
+
+    /// A probe the link could not carry lowers the estimate.
+    #[test]
+    fn a_lost_probe_lowers_the_estimate() {
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.btlbw_bps = 1_000_000.0;
+        estimator.on_probe_result(
+            &ProbeOutcome {
+                delivered: false,
+                delivered_ratio: 0.0,
+                probe_rate_bps: 1_250_000,
+            },
+            Instant::now(),
+        );
+        assert!(estimator.btlbw_bps < 1_000_000.0);
     }
 }
