@@ -2424,7 +2424,7 @@ mod tests {
         // its cells stay pending for the repair plan.
         let epoch = Instant::now();
         let grid = CellGrid::with_cell_size(128, 64, 64);
-        let mut config = MediaSenderConfig::new(crate::media::pdu::Carrier::Ws, grid);
+        let mut config = MediaSenderConfig::new(Carrier::Ws, grid);
         config.bwe.ceiling_bps = 10_000_000;
         let mut sender = MediaSenderMachine::new(config, grid, epoch);
         // A link that carries a megabit a second: the cap is well above the
