@@ -1987,6 +1987,28 @@ impl MediaSenderMachine {
         }
     }
 
+    /// Drop the queued objects the current cap forbids.
+    fn drop_oversized_objects(&mut self, cap: usize) {
+        let mut index = 0;
+        while index < self.objects.len() {
+            let object = &self.objects[index];
+            let oversized =
+                object.update_id.is_some() && !object.is_released() && object.payload.len() > cap;
+            if oversized {
+                self.objects.remove(index);
+                self.stats.in_flight_evictions_total += 1;
+                self.reindex_slots(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// The estimate refresh, for the suites that drive it directly.
+    pub fn refresh_estimate_for_test(&mut self, now: Instant) {
+        self.refresh_estimate(now);
+    }
+
     fn reindex_slots(&mut self, removed: usize) {
         if let Some(slot) = self.cursor_slot
             && slot >= removed
@@ -2000,6 +2022,13 @@ impl MediaSenderMachine {
             return;
         }
         let estimate = self.estimator.estimate();
+        // A cap that dropped leaves the queue holding objects the sender may
+        // no longer put on the wire: the estimate's cap is the sender's own
+        // bound on what one object may carry, and an object admitted under
+        // the old cap is still an object the current cap forbids. Such an
+        // object is dropped and counted; its cells stay pending, and the
+        // repair plan covers them (MLP spec §6.2.8).
+        self.drop_oversized_objects(estimate.max_object_bytes as usize);
         self.last_estimate = estimate;
         self.pacer
             .set_pace(estimate.pace_bps, estimate.max_object_bytes, now);
@@ -2384,6 +2413,61 @@ mod tests {
         assert!(
             sender.scheduler().plans().is_active(),
             "a plan poll does not consume the plan: its bands are updates"
+        );
+    }
+
+    #[test]
+    fn a_dropped_cap_drops_the_objects_it_forbids() {
+        // The estimate's cap is the sender's own bound on what one object may
+        // carry. When it drops, an object admitted under the old cap is still
+        // an object the current cap forbids: it is dropped and counted, and
+        // its cells stay pending for the repair plan.
+        let epoch = Instant::now();
+        let grid = CellGrid::with_cell_size(128, 64, 64);
+        let mut config = MediaSenderConfig::new(crate::media::pdu::Carrier::Ws, grid);
+        config.bwe.ceiling_bps = 10_000_000;
+        let mut sender = MediaSenderMachine::new(config, grid, epoch);
+        // A link that carries a megabit a second: the cap is well above the
+        // no-feedback floor.
+        for _ in 0..5 {
+            sender.estimator_mut().on_feedback(
+                &MediaFeedback {
+                    rtt_ms: 50,
+                    received_bytes: 125_000,
+                    received_objects: 40,
+                    lost_objects: 0,
+                    window_ms: 1_000,
+                    ..MediaFeedback::default()
+                },
+                epoch,
+            );
+        }
+        sender.estimator_mut().on_rtt_sample(50.0, epoch);
+        sender.refresh_estimate_for_test(epoch);
+        let cap = sender.estimate().max_object_bytes as usize;
+        assert!(cap > 1_024, "the cap is above the no-feedback floor: {cap}");
+        let payload = vec![7_u8; cap.min(4_096)];
+        let outcome = sender.enqueue_update(
+            {
+                let mut frame = UpdateRequest::delta(payload, vec![0, 1]);
+                frame.update_bytes = cap.min(4_096) as u32;
+                frame
+            },
+            epoch,
+        );
+        assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+        assert_eq!(sender.queued_objects(), 1);
+        // The lane goes silent: the estimator's no-feedback mode drops the
+        // object cap to 1 024 bytes (MLP spec §6.2.8), below the queued
+        // object's payload.
+        sender
+            .estimator_mut()
+            .on_timeout(epoch + Duration::from_secs(30));
+        sender.refresh_estimate_for_test(epoch + Duration::from_secs(30));
+        assert_eq!(
+            sender.queued_objects(),
+            0,
+            "the object the new cap forbids never reaches the wire"
         );
     }
 
