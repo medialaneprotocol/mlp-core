@@ -686,7 +686,8 @@ impl MediaReceiverMachine {
     pub fn build_feedback(&mut self, now: Instant) -> MediaFeedback {
         let closed = self.idle_feedback_due(now);
         let window_ms = if closed {
-            now.saturating_duration_since(self.window_started_at).as_millis() as u64
+            now.saturating_duration_since(self.window_started_at)
+                .as_millis() as u64
         } else {
             0
         };
@@ -926,7 +927,10 @@ mod tests {
         let closed = receiver.build_feedback(now + receiver.report_interval());
         assert_eq!(closed.lost_objects, 1);
         assert_eq!(closed.received_objects, 2);
-        assert_eq!(closed.window_ms, receiver.report_interval().as_millis() as u64);
+        assert_eq!(
+            closed.window_ms,
+            receiver.report_interval().as_millis() as u64
+        );
         assert_eq!(receiver.build_feedback(now).lost_objects, 0);
     }
 
@@ -1025,7 +1029,10 @@ mod tests {
         // The report that carries it goes out then, and it carries the echo.
         let feedback = receiver.build_feedback(due);
         assert_eq!(
-            feedback.ack.expect("the report carries an acknowledgement").echo_of_input_seq,
+            feedback
+                .ack
+                .expect("the report carries an acknowledgement")
+                .echo_of_input_seq,
             42
         );
         // The echo has been reported: nothing is pending any more.
