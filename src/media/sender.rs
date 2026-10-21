@@ -1297,6 +1297,11 @@ impl MediaSenderMachine {
         }
         let session_ms = self.session_ms(now);
         self.stats.acks_applied += 1;
+        // An acknowledgement is a sign of life (MLP spec §6.2.8): the peer is
+        // applying what this sender sent, so the lane is alive even when the
+        // peer's *report* is late. A grace that only a report can move is a
+        // grace a single lost report resets to its floor.
+        self.estimator.on_evidence(now);
         let outcome = self.accounting.apply_ack(&ack, session_ms);
         if outcome.epoch_mismatch {
             self.request_plan(PlanStartReason::Epoch);

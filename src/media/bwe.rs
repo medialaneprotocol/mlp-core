@@ -243,7 +243,9 @@ pub struct BandwidthEstimator {
     reports_in_state: u32,
     /// Consecutive healthy reports in Degraded.
     healthy_reports: u32,
-    last_report_at: Option<Instant>,
+    /// The last sign of life from the peer: a report, an acknowledgement, or
+    /// the echo of a probe this sender sent (§6.2.8).
+    last_evidence_at: Option<Instant>,
     no_feedback: bool,
     loss_ratio: f64,
     goodput_bps: f64,
@@ -290,10 +292,10 @@ impl BandwidthEstimator {
             rtt_samples: VecDeque::new(),
             reports_in_state: 0,
             healthy_reports: 0,
-            last_report_at: None,
             // A session that has never heard from the receiver is not "stalled",
             // it is "not yet started": the no-feedback mode requires at least
-            // one report so a cold receiver cannot be misclassified.
+            // one sign of life so a cold receiver cannot be misclassified.
+            last_evidence_at: None,
             no_feedback: false,
             loss_ratio: 0.0,
             goodput_bps: 0.0,
@@ -387,6 +389,12 @@ impl BandwidthEstimator {
     }
 
     /// The no-feedback grace window `3 × report_interval + 2 s`.
+    ///
+    /// It is a function of the **last known** round trip (§6.2.2) with a
+    /// floor: a link that has never answered has no round trip to scale the
+    /// grace by, and the floor is what a link that has not answered yet gets.
+    /// A round trip that *has* been measured is kept, so a lane that goes
+    /// quiet keeps the grace its own measurement earned.
     pub fn no_feedback_grace(&self) -> Duration {
         3 * self.report_interval() + Duration::from_secs(2)
     }
@@ -409,12 +417,38 @@ impl BandwidthEstimator {
         self.demand_bps = demand_bps as f64;
     }
 
+    /// Note that the peer showed a sign of life.
+    ///
+    /// A sign of life is **any** object the peer sends: a feedback report, an
+    /// acknowledgement, or the echo of a probe this sender sent. The report is
+    /// the estimator's *measurement*; the loss of one report is harmless
+    /// (MLP spec §3.1 — class C4 is "reliable within a reporting window"), so
+    /// a lane whose acknowledgements keep arriving is a live lane whose
+    /// measurement is late, not a dead one.
+    ///
+    /// The no-feedback grace (§6.2.8) runs from the last sign of life, not
+    /// from the last report: a grace only a report can move is a grace a
+    /// single lost report resets to its floor, and the link then looks dead
+    /// while it is merely quiet.
+    pub fn on_evidence(&mut self, now: Instant) {
+        self.note_evidence(now);
+    }
+
+    /// The last sign of life from the peer, if any.
+    pub fn last_evidence_at(&self) -> Option<Instant> {
+        self.last_evidence_at
+    }
+
+    fn note_evidence(&mut self, now: Instant) {
+        self.last_evidence_at = Some(now);
+        self.no_feedback = false;
+    }
+
     /// Feed one receiver feedback object (MLP spec §6.2).
     pub fn on_feedback(&mut self, feedback: &MediaFeedback, now: Instant) {
         let report_interval = self.report_interval();
         let _ = report_interval;
-        self.last_report_at = Some(now);
-        self.no_feedback = false;
+        self.note_evidence(now);
 
         // The receiver's report is its own view of the round trip, measured on
         // the receiver's clock. The estimator's filters — a minimum over a
@@ -634,7 +668,7 @@ impl BandwidthEstimator {
 
     /// Advance timers: no-feedback detection and probe cadence.
     pub fn on_timeout(&mut self, now: Instant) {
-        if let Some(last) = self.last_report_at
+        if let Some(last) = self.last_evidence_at
             && now.saturating_duration_since(last) > self.no_feedback_grace()
         {
             self.no_feedback = true;
@@ -760,7 +794,7 @@ impl BandwidthEstimator {
     ///
     /// The echo that quotes the pending probe's epoch is that probe's answer:
     /// the probe was delivered, and the link carried it at the rate the probe
-    /// was sent at.
+    /// was sent at. A delivered probe is also a sign of life (§6.2.8).
     pub fn on_probe_echo(&mut self, echo: &ProbeEcho, now: Instant) {
         let pending = self.probe_pending.as_ref();
         let Some(pending) = pending else {
@@ -769,10 +803,12 @@ impl BandwidthEstimator {
         if pending.send_epoch_ms != Some(echo.send_epoch_ms) {
             return;
         }
+        let rate_bps = pending.request.rate_bps;
+        self.note_evidence(now);
         let outcome = ProbeOutcome {
             delivered: true,
             delivered_ratio: 1.0,
-            probe_rate_bps: pending.request.rate_bps,
+            probe_rate_bps: rate_bps,
         };
         self.on_probe_result(&outcome, now);
     }
@@ -860,7 +896,7 @@ impl BandwidthEstimator {
                 _ => candidate,
             });
         };
-        if let Some(last) = self.last_report_at
+        if let Some(last) = self.last_evidence_at
             && !self.no_feedback
         {
             let deadline = last + self.no_feedback_grace();
@@ -1142,6 +1178,84 @@ mod tests {
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         estimator.on_timeout(now + Duration::from_secs(60));
         assert_eq!(estimator.mode(), BweMode::StartUp);
+    }
+
+    /// **An acknowledgement is a sign of life (MLP spec §6.2.8).**
+    ///
+    /// A report is the estimator's *measurement*; the loss of one report is
+    /// harmless (class C4 is "reliable within a reporting window", §3.1). A
+    /// lane whose acknowledgements keep arriving is a live lane whose
+    /// measurement is late — not a dead one, and not a lane that drops to the
+    /// emergency profile because one report was lost.
+    #[test]
+    fn an_acknowledgement_keeps_the_lane_out_of_the_no_feedback_mode() {
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
+        let grace = estimator.no_feedback_grace();
+        // The report stops; the acknowledgements keep coming.
+        for step in 1..=8 {
+            let at = now + Duration::from_millis(step * 300);
+            estimator.on_evidence(at);
+            estimator.on_timeout(at);
+            assert_ne!(
+                estimator.mode(),
+                BweMode::NoFeedback,
+                "the lane is alive: an acknowledgement is a sign of life"
+            );
+        }
+        // Silence longer than the grace is what the mode is for.
+        let last = estimator.last_evidence_at().expect("a sign of life");
+        estimator.on_timeout(last + grace + Duration::from_millis(1));
+        assert_eq!(estimator.mode(), BweMode::NoFeedback);
+    }
+
+    /// **The grace is a function of the last known round trip.**
+    ///
+    /// A link that has measured a round trip keeps the grace that measurement
+    /// earned: the grace does not collapse to its floor because the *reports*
+    /// stopped. A link that has never measured one gets the floor.
+    #[test]
+    fn the_grace_follows_the_last_known_round_trip() {
+        let now = Instant::now();
+        let mut measured = BandwidthEstimator::new(BweConfig::default());
+        measured.on_rtt_sample(1_500.0, now);
+        // 4 × 1 500 ms clamps to the 2 s report interval: 3 × 2 s + 2 s.
+        assert_eq!(measured.report_interval(), Duration::from_millis(2_000));
+        assert_eq!(measured.no_feedback_grace(), Duration::from_secs(8));
+        let mut unknown = BandwidthEstimator::new(BweConfig::default());
+        assert_eq!(unknown.no_feedback_grace(), Duration::from_millis(2_750));
+        assert!(measured.no_feedback_grace() > unknown.no_feedback_grace());
+    }
+
+    /// A delivered probe is a sign of life: it is the peer answering.
+    #[test]
+    fn a_delivered_probe_is_a_sign_of_life() {
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        for _ in 0..5 {
+            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
+        }
+        let probe = estimator.probe_due(now).expect("a probe is due");
+        estimator.note_probe_sent(42, now);
+        let grace = estimator.no_feedback_grace();
+        estimator.on_timeout(now + grace + Duration::from_millis(1));
+        assert_eq!(estimator.mode(), BweMode::NoFeedback);
+        estimator.on_probe_echo(
+            &ProbeEcho {
+                object_id: 1,
+                send_epoch_ms: 42,
+                echo_epoch_ms: 0,
+                payload_bytes: 64,
+            },
+            now + grace + Duration::from_secs(1),
+        );
+        assert_ne!(
+            estimator.mode(),
+            BweMode::NoFeedback,
+            "the probe's echo is a sign of life"
+        );
+        assert_eq!(probe.payload_bytes <= 8_192, true);
     }
 
     #[test]
