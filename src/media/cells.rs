@@ -282,6 +282,8 @@ pub struct CellCounters {
     pub repair_stuck_cells: u64,
     /// Cells marked stale by a update-epoch change.
     pub epoch_resets: u64,
+    /// Acks that named an older chain epoch than the sender's.
+    pub epoch_stale_acks: u64,
     /// Updates the accounting accepted from acks.
     pub applied_updates: u64,
 }
@@ -297,6 +299,15 @@ pub struct AckOutcome {
     pub ring_miss: bool,
     /// Whether the ack's epoch differs from ours.
     pub epoch_mismatch: bool,
+    /// Whether the ack named an **older** epoch than ours.
+    ///
+    /// The chain epoch is the sender's, and it only moves forward (MLP spec
+    /// §5.1): an acknowledgement that names an older epoch is a stale
+    /// acknowledgement from a receiver that has not seen the break yet. It is
+    /// counted, never obeyed — obeying it would reset the applied-update
+    /// watermark and re-mark every cell due, which is a re-send storm for a
+    /// chain the receiver still holds.
+    pub epoch_stale: bool,
     /// Whether the receiver is converged after this ack.
     pub converged: bool,
 }
@@ -503,9 +514,20 @@ impl CellAccounting {
     /// Apply one ack (MLP spec §8).
     pub fn apply_ack(&mut self, ack: &MediaAck, now_ms: u64) -> AckOutcome {
         let mut outcome = AckOutcome::default();
-        if ack.chain_epoch != self.epoch {
+        // The chain epoch belongs to the sender, and it only moves forward
+        // (MLP spec §5.1): the sender increments it when it breaks the chain,
+        // and the receiver adopts a *greater* one. An acknowledgement that
+        // names an older epoch is a stale acknowledgement — the receiver has
+        // not seen the break yet — and obeying it would reset the
+        // applied-update watermark and re-mark every emitted cell due. That
+        // is a re-send storm for a chain the receiver still holds, so the
+        // epoch is counted and left alone.
+        if ack.chain_epoch > self.epoch {
             outcome.epoch_mismatch = true;
             self.set_epoch(ack.chain_epoch);
+        } else if ack.chain_epoch < self.epoch {
+            outcome.epoch_stale = true;
+            self.counters.epoch_stale_acks += 1;
         }
         self.last_ack_at_ms = Some(now_ms);
         // An ack can never name a update we did not send; clamping keeps a
@@ -949,6 +971,37 @@ mod tests {
         let outcome = accounting.apply_ack(&stale, 10);
         assert!(outcome.epoch_mismatch);
         assert_eq!(accounting.epoch(), 1);
+    }
+
+    #[test]
+    fn an_ack_with_an_older_epoch_never_moves_the_epoch_back() {
+        // The chain epoch is the sender's and it only moves forward (MLP spec
+        // §5.1). A receiver that has not seen the break yet acknowledges with
+        // the older epoch; obeying it would reset the applied-update
+        // watermark and re-mark every emitted cell due — a re-send storm for a
+        // chain the receiver still holds.
+        let mut accounting = accounting(200, 200, false);
+        accounting.set_epoch(3);
+        accounting.mark_emitted(1, &[0], 0);
+        let mut behind = ack(1, 0b1);
+        behind.chain_epoch = 2;
+        let outcome = accounting.apply_ack(&behind, 10);
+        assert!(outcome.epoch_stale);
+        assert!(!outcome.epoch_mismatch);
+        assert_eq!(accounting.epoch(), 3, "the epoch never goes back");
+        assert_eq!(
+            accounting.counters().epoch_resets,
+            1,
+            "only the raise counted"
+        );
+        assert_eq!(accounting.counters().epoch_stale_acks, 1);
+        // The applied-update watermark survives: the chain the receiver holds
+        // is the one the sender is still accounting for.
+        assert_eq!(accounting.last_applied_update_id(), 1);
+        assert!(
+            accounting.due_cells(0).is_empty(),
+            "the chain the receiver holds is the one the sender accounts for"
+        );
     }
 
     #[test]
