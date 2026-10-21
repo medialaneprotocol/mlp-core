@@ -1223,7 +1223,7 @@ mod tests {
         // 4 × 1 500 ms clamps to the 2 s report interval: 3 × 2 s + 2 s.
         assert_eq!(measured.report_interval(), Duration::from_millis(2_000));
         assert_eq!(measured.no_feedback_grace(), Duration::from_secs(8));
-        let mut unknown = BandwidthEstimator::new(BweConfig::default());
+        let unknown = BandwidthEstimator::new(BweConfig::default());
         assert_eq!(unknown.no_feedback_grace(), Duration::from_millis(2_750));
         assert!(measured.no_feedback_grace() > unknown.no_feedback_grace());
     }
