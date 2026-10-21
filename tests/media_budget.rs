@@ -134,6 +134,57 @@ fn tier_echo_p95_ms(tier: Tier) -> u64 {
     }
 }
 
+/// The prompt report: the wait an input's answer pays before it leaves.
+///
+/// The measurement is the machine's own: the echo exists, and the report that
+/// carries it is due at the prompt interval — not at the idle cadence, which
+/// is what the answer used to wait for. The promise it has to respect is the
+/// echo's own (`2 × RTT + 250 ms`, MLP spec annex INV-8): the wait is a
+/// quarter of a round trip, so the whole echo stays inside the budget.
+#[test]
+fn the_prompt_report_does_not_wait_for_the_idle_cadence() {
+    use mlp_core::media::pdu::Carrier;
+    use mlp_core::media::receiver::{MediaReceiverConfig, MediaReceiverMachine};
+    use std::time::Instant;
+
+    for (tier, rtt_ms) in [
+        (Tier::T0, 10.0),
+        (Tier::T1, 50.0),
+        (Tier::T2, 150.0),
+        (Tier::T3, 600.0),
+        (Tier::T4, 2_000.0),
+    ] {
+        let now = Instant::now();
+        let mut receiver =
+            MediaReceiverMachine::new(MediaReceiverConfig::for_carrier(Carrier::Ws), now);
+        receiver.on_rtt_sample(rtt_ms);
+        let idle = receiver.report_interval();
+        let prompt = receiver.prompt_interval();
+        // The echo exists: the answer is waiting.
+        receiver.set_echo_of_input_seq(1);
+        assert!(receiver.prompt_pending());
+        // The report is due at the prompt interval, and the idle cadence has
+        // not elapsed: the answer does not wait for the cadence.
+        let due = now + prompt;
+        assert!(receiver.feedback_due(due));
+        assert!(!receiver.idle_feedback_due(due));
+        // The wait is a quarter of a round trip, so the echo's budget holds.
+        let budget = 2.0 * rtt_ms + 250.0;
+        assert!(
+            prompt.as_millis() as f64 <= budget,
+            "{}: the prompt waits {:?}, the budget is {budget:.0} ms",
+            tier.as_str(),
+            prompt
+        );
+        eprintln!(
+            "MEASURE prompt-report-{}: the answer leaves after {:?}, the idle cadence was {:?} (rtt {rtt_ms:.0} ms)",
+            tier.as_str(),
+            prompt,
+            idle
+        );
+    }
+}
+
 /// INV-6: no object exceeds the estimator's cap, and no update exceeds
 /// `max_parts × fragment_cap`. The harness enforces this while running;
 /// this test asserts the trace's shape too.

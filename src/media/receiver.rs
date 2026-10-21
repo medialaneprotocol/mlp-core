@@ -24,6 +24,12 @@ pub const REPORT_INTERVAL_FLOOR_MS: u64 = 250;
 pub const REPORT_INTERVAL_CEILING_MS: u64 = 2_000;
 /// Cadence factor: `report_interval = 4 × rtt_min`.
 pub const REPORT_INTERVAL_FACTOR: f64 = 4.0;
+/// The prompt report's floor: the shortest wait between two prompt reports.
+pub const REPORT_PROMPT_FLOOR_MS: u64 = 25;
+/// The prompt report's ceiling.
+pub const REPORT_PROMPT_CEILING_MS: u64 = 250;
+/// The prompt interval's factor: `prompt_interval = rtt_min / 4`.
+pub const REPORT_PROMPT_FACTOR: f64 = 0.25;
 /// How many applied `(update_id, part_index)` pairs are remembered.
 pub const APPLIED_CHUNK_WINDOW: usize = 512;
 /// How many outstanding probes a receiver keeps.
@@ -73,7 +79,10 @@ pub enum MediaReceiveEvent {
         /// `ASSEMBLY_TIMEOUT` or `ASSEMBLY_EVICTED`.
         reason: RejectReason,
     },
-    /// The report cadence is due: build and send a `MediaFeedback`.
+    /// The report is due: build and send a `MediaFeedback`.
+    ///
+    /// Either the idle cadence elapsed, or a fact the sender cannot wait for
+    /// is waiting — an input echo or a loss attribution (MLP spec §6.2.1).
     FeedbackDue,
     /// Answer the peer's probe with this echo.
     ProbeEchoDue(ProbeEcho),
@@ -159,7 +168,17 @@ pub struct MediaReceiverMachine {
     window_reordered: u64,
     window_input_submitted: u64,
     window_input_expired: u64,
+    /// The start of the open measurement window: the last report that closed
+    /// one. The idle cadence runs from here, so a prompt report never
+    /// disturbs the measurement's period.
+    window_started_at: Instant,
+    /// The last report of any kind.
     last_report: Instant,
+    /// The last report that carried a prompt, and the facts it carried: the
+    /// echo it named and the loss it counted. A fact is reported once.
+    last_prompt: Instant,
+    echo_reported: u64,
+    loss_reported: u64,
     // RTT state.
     rtt_ms: f64,
     rtt_min_ms: f64,
@@ -208,7 +227,11 @@ impl MediaReceiverMachine {
             window_reordered: 0,
             window_input_submitted: 0,
             window_input_expired: 0,
+            window_started_at: now,
             last_report: now,
+            last_prompt: now,
+            echo_reported: 0,
+            loss_reported: 0,
             rtt_ms: 0.0,
             rtt_min_ms: 0.0,
             jitter_ms: 0.0,
@@ -274,6 +297,9 @@ impl MediaReceiverMachine {
     }
 
     /// The report cadence: `clamp(4 × rtt_min, 250, 2 000)`.
+    ///
+    /// This is the **idle** cadence: the rate at which a receiver reports
+    /// when it has nothing to say (MLP spec §6.2.1).
     pub fn report_interval(&self) -> Duration {
         let rtt_min = if self.rtt_min_ms > 0.0 {
             self.rtt_min_ms
@@ -287,9 +313,57 @@ impl MediaReceiverMachine {
         Duration::from_secs_f64(interval / 1_000.0)
     }
 
+    /// The prompt interval: `clamp(rtt_min / 4, 25, 250)`.
+    ///
+    /// The shortest wait between two prompt reports. It is a quarter of a
+    /// round trip, so the wait a prompt report adds never spends the echo's
+    /// budget (`2 × RTT + 250 ms`, MLP spec annex INV-8), and it is bounded
+    /// below and above so a fast link is not flooded with reports and a slow
+    /// one does not turn its reports into a stream.
+    pub fn prompt_interval(&self) -> Duration {
+        let rtt_min = if self.rtt_min_ms > 0.0 {
+            self.rtt_min_ms
+        } else {
+            REPORT_PROMPT_FLOOR_MS as f64 / REPORT_PROMPT_FACTOR
+        };
+        let interval = (REPORT_PROMPT_FACTOR * rtt_min).clamp(
+            REPORT_PROMPT_FLOOR_MS as f64,
+            REPORT_PROMPT_CEILING_MS as f64,
+        );
+        Duration::from_secs_f64(interval / 1_000.0)
+    }
+
+    /// Whether a fact is waiting that the sender cannot wait for.
+    ///
+    /// Two facts qualify (MLP spec §6.2.1): an **input echo** the sender has
+    /// not been told about, and a **loss attribution** — a gap the receiver
+    /// observed in the update-id space since the last report.
+    pub fn prompt_pending(&self) -> bool {
+        self.echo_of_input_seq != self.echo_reported || self.window_lost > self.loss_reported
+    }
+
     /// Whether the report is due.
+    ///
+    /// The idle cadence, or a prompt: a report goes out at once when the
+    /// receiver holds an echo or a loss attribution the sender cannot wait
+    /// for, and at the idle cadence when it does not (MLP spec §6.2.1).
     pub fn feedback_due(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.last_report) >= self.report_interval()
+        self.idle_feedback_due(now) || self.prompt_feedback_due(now)
+    }
+
+    /// Whether the idle cadence is due.
+    ///
+    /// The cadence runs from the start of the open measurement window, not
+    /// from the last report of any kind: a prompt report is an extra report,
+    /// and it must not push the measurement's period forward.
+    pub fn idle_feedback_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.window_started_at) >= self.report_interval()
+    }
+
+    /// Whether a prompt report is due.
+    pub fn prompt_feedback_due(&self, now: Instant) -> bool {
+        self.prompt_pending()
+            && now.saturating_duration_since(self.last_prompt) >= self.prompt_interval()
     }
 
     /// Parse and assemble one carrier message.
@@ -455,8 +529,12 @@ impl MediaReceiverMachine {
         if let Some(assembly) = self.assembler.poll_timeout(now) {
             consider(assembly);
         }
-        let report_deadline = self.last_report + self.report_interval();
+        let report_deadline = self.window_started_at + self.report_interval();
         consider(report_deadline.saturating_duration_since(now));
+        if self.prompt_pending() {
+            let prompt_deadline = self.last_prompt + self.prompt_interval();
+            consider(prompt_deadline.saturating_duration_since(now));
+        }
         if let Some(last) = self.last_probe {
             let deadline = last + Duration::from_millis(self.config.probe_interval_ms);
             consider(deadline.saturating_duration_since(now));
@@ -540,6 +618,10 @@ impl MediaReceiverMachine {
     }
 
     /// Update the highest input sequence visible in applied cells (MLP spec annex N, N-1).
+    ///
+    /// A new echo is a fact the sender cannot wait for: the report that
+    /// carries it goes out at once rather than at the idle cadence
+    /// (MLP spec §6.2.1).
     pub fn set_echo_of_input_seq(&mut self, input_seq: u64) {
         self.echo_of_input_seq = input_seq;
     }
@@ -592,9 +674,22 @@ impl MediaReceiverMachine {
         }
     }
 
-    /// Build the feedback report for the current window and reset it.
+    /// Build the feedback report for the current window.
+    ///
+    /// The report that **closes** the measurement window carries the window's
+    /// counters and the window's length, and starts the next window. The
+    /// **prompt** report — the one a fact the sender cannot wait for brings
+    /// forward — carries the open window's counters and no window at all:
+    /// `window_ms = 0` says "the measurement window is still open", and a
+    /// sender reads that as an acknowledgement and a sign of life rather
+    /// than as a measurement (MLP spec §6.2.1).
     pub fn build_feedback(&mut self, now: Instant) -> MediaFeedback {
-        let window_ms = now.saturating_duration_since(self.last_report).as_millis() as u64;
+        let closed = self.idle_feedback_due(now);
+        let window_ms = if closed {
+            now.saturating_duration_since(self.window_started_at).as_millis() as u64
+        } else {
+            0
+        };
         let report = MediaFeedback {
             rtt_ms: self.rtt_ms.round().clamp(1.0, 60_000.0) as u32,
             rtt_min_ms: self.rtt_min_ms.round().clamp(1.0, 60_000.0) as u32,
@@ -620,13 +715,21 @@ impl MediaReceiverMachine {
         };
         self.stats.feedback_reports += 1;
         self.last_report = now;
-        self.window_bytes = 0;
-        self.window_objects = 0;
-        self.window_lost = 0;
-        self.window_duplicates = 0;
-        self.window_reordered = 0;
-        self.window_input_submitted = 0;
-        self.window_input_expired = 0;
+        self.last_prompt = now;
+        self.echo_reported = self.echo_of_input_seq;
+        self.loss_reported = self.window_lost;
+        if closed {
+            // The window closes: its counters are the measurement, and the
+            // next window starts here.
+            self.window_started_at = now;
+            self.window_bytes = 0;
+            self.window_objects = 0;
+            self.window_lost = 0;
+            self.window_duplicates = 0;
+            self.window_reordered = 0;
+            self.window_input_submitted = 0;
+            self.window_input_expired = 0;
+        }
         report
     }
 
@@ -805,17 +908,25 @@ mod tests {
     #[test]
     fn gap_detection_counts_lost_objects() {
         let now = Instant::now();
-        let mut receiver = receiver(Carrier::Ws);
+        let mut receiver = receiver_at(Carrier::Ws, now);
         let first = media_fragment(1, 1, 0, 1, vec![0]);
         receiver.on_message(&first.encode(), now);
         // Object 2 is lost; object 3 arrives.
         let third = media_fragment(3, 3, 0, 1, vec![0]);
         receiver.on_message(&third.encode(), now);
         assert_eq!(receiver.stats().lost_objects, 1);
-        let feedback = receiver.build_feedback(now);
-        assert_eq!(feedback.lost_objects, 1);
-        assert_eq!(feedback.received_objects, 2);
-        // The window resets.
+        // A prompt report carries the open window: the counters are there,
+        // and the window is still open.
+        let prompt = receiver.build_feedback(now);
+        assert_eq!(prompt.lost_objects, 1);
+        assert_eq!(prompt.received_objects, 2);
+        assert_eq!(prompt.window_ms, 0, "the prompt carries no window");
+        // The report that closes the window carries the same counters and the
+        // window's length, and the window resets.
+        let closed = receiver.build_feedback(now + receiver.report_interval());
+        assert_eq!(closed.lost_objects, 1);
+        assert_eq!(closed.received_objects, 2);
+        assert_eq!(closed.window_ms, receiver.report_interval().as_millis() as u64);
         assert_eq!(receiver.build_feedback(now).lost_objects, 0);
     }
 
@@ -895,6 +1006,77 @@ mod tests {
         receiver.note_applied_chunk(7, 1);
         assert!(receiver.is_chunk_applied(7, 1));
         assert!(!receiver.is_chunk_applied(7, 2));
+    }
+
+    #[test]
+    fn an_echo_is_a_report_the_sender_cannot_wait_for() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        // With no round trip measured the idle cadence is its floor: the echo
+        // must not wait for it.
+        assert_eq!(receiver.report_interval(), Duration::from_millis(250));
+        assert!(!receiver.feedback_due(now));
+        receiver.set_echo_of_input_seq(42);
+        assert!(receiver.prompt_pending());
+        // The prompt leaves within the prompt interval, not at the cadence.
+        let due = now + receiver.prompt_interval();
+        assert!(receiver.prompt_feedback_due(due));
+        assert!(receiver.feedback_due(due));
+        // The report that carries it goes out then, and it carries the echo.
+        let feedback = receiver.build_feedback(due);
+        assert_eq!(
+            feedback.ack.expect("the report carries an acknowledgement").echo_of_input_seq,
+            42
+        );
+        // The echo has been reported: nothing is pending any more.
+        assert!(!receiver.prompt_pending());
+        assert!(!receiver.feedback_due(due));
+    }
+
+    #[test]
+    fn a_loss_is_a_report_the_sender_cannot_wait_for() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        // A gap in the object id space: the receiver observed a loss.
+        let first = media_fragment(9, 1, 0, 1, vec![0; 10]);
+        let _ = receiver.on_message(&first.encode(), now);
+        let later = now + Duration::from_millis(10);
+        let second = media_fragment(12, 2, 0, 1, vec![0; 10]);
+        let _ = receiver.on_message(&second.encode(), later);
+        assert_eq!(receiver.stats().lost_objects, 2);
+        assert!(receiver.prompt_pending());
+        let due = later + receiver.prompt_interval();
+        assert!(receiver.feedback_due(due));
+        let feedback = receiver.build_feedback(due);
+        assert_eq!(feedback.lost_objects, 2);
+        assert!(!receiver.prompt_pending());
+    }
+
+    #[test]
+    fn a_prompt_report_waits_for_its_own_interval() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        // With no round trip measured the prompt interval is its floor.
+        assert_eq!(receiver.prompt_interval(), Duration::from_millis(25));
+        receiver.set_echo_of_input_seq(1);
+        let first = now + receiver.prompt_interval();
+        assert!(receiver.feedback_due(first));
+        let _ = receiver.build_feedback(first);
+        // A second echo arrives: it waits for the prompt interval, so the
+        // reports do not become a stream.
+        receiver.set_echo_of_input_seq(2);
+        assert!(receiver.prompt_pending());
+        assert!(!receiver.prompt_feedback_due(first + Duration::from_millis(24)));
+        assert!(receiver.prompt_feedback_due(first + Duration::from_millis(25)));
+    }
+
+    #[test]
+    fn the_idle_cadence_is_still_the_cadence_of_a_quiet_lane() {
+        let now = Instant::now();
+        let receiver = receiver_at(Carrier::Ws, now);
+        assert!(!receiver.feedback_due(now + Duration::from_millis(249)));
+        assert!(receiver.idle_feedback_due(now + Duration::from_millis(250)));
+        assert!(receiver.feedback_due(now + Duration::from_millis(250)));
     }
 
     #[test]

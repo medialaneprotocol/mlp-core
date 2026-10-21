@@ -241,6 +241,9 @@ pub struct BandwidthEstimator {
     rtt_samples: VecDeque<(Instant, f64)>,
     /// Reports observed in the current state (used by StartUp and Degraded).
     reports_in_state: u32,
+    /// The prompt reports the peer sent: reports that carried no measurement
+    /// window (MLP spec §6.2.1).
+    prompt_reports: u64,
     /// Consecutive healthy reports in Degraded.
     healthy_reports: u32,
     /// The last sign of life from the peer: a report, an acknowledgement, or
@@ -291,6 +294,7 @@ impl BandwidthEstimator {
             jitter_ms: 0.0,
             rtt_samples: VecDeque::new(),
             reports_in_state: 0,
+            prompt_reports: 0,
             healthy_reports: 0,
             // A session that has never heard from the receiver is not "stalled",
             // it is "not yet started": the no-feedback mode requires at least
@@ -445,6 +449,13 @@ impl BandwidthEstimator {
     }
 
     /// Feed one receiver feedback object (MLP spec §6.2).
+    ///
+    /// A **prompt** report — one the receiver sent before its measurement
+    /// window closed, which carries no window (`window_ms = 0`) — is an
+    /// acknowledgement and a sign of life, not a measurement: a goodput over
+    /// an open window is whatever the last burst carried, and a loss ratio
+    /// over one lost object in three is a third. The estimate moves on the
+    /// reports that close a window (MLP spec §6.2.1).
     pub fn on_feedback(&mut self, feedback: &MediaFeedback, now: Instant) {
         let report_interval = self.report_interval();
         let _ = report_interval;
@@ -457,6 +468,13 @@ impl BandwidthEstimator {
         // clock, so the report is a cross-check and never a sample
         // (MLP spec §6.2.2).
         self.cross_check_rtt(feedback);
+
+        if feedback.window_ms == 0 {
+            // A prompt: the lane is alive and the peer answered, and the
+            // measurement window is still open.
+            self.prompt_reports += 1;
+            return;
+        }
 
         let goodput = feedback.goodput_bps().map(|value| value as f64);
         if let Some(goodput) = goodput {
@@ -514,6 +532,12 @@ impl BandwidthEstimator {
             self.rtt_view_disagreements += 1;
             self.rtt_disagreement_ms = disagreement;
         }
+    }
+
+    /// How many prompt reports the peer sent (reports with no measurement
+    /// window, MLP spec §6.2.1).
+    pub fn prompt_report_count(&self) -> u64 {
+        self.prompt_reports
     }
 
     /// How many reports were compared with the sender's own measurement.
@@ -1015,6 +1039,33 @@ mod tests {
     fn sent_at_pace(estimator: &mut BandwidthEstimator, window_ms: u64, now: Instant) {
         let bytes = (estimator.pace_bps() / 8) as usize * (window_ms as usize / 1_000);
         estimator.on_send(bytes.max(1), 1, now);
+    }
+
+    #[test]
+    fn a_prompt_report_moves_no_estimate() {
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        for _ in 0..4 {
+            sent_at_pace(&mut estimator, 1_000, now);
+            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
+        }
+        let pace = estimator.pace_bps();
+        let btlbw = estimator.btlbw_bps();
+        let mode = estimator.mode();
+        // A prompt: the report carries no window, so it is an acknowledgement
+        // and a sign of life, not a measurement (MLP spec §6.2.1). A goodput
+        // over an open window and a loss ratio over one lost object in three
+        // are not the sender's estimate to move.
+        let mut prompt = feedback(10, 1_000, 2, 1, 0);
+        prompt.window_ms = 0;
+        sent_at_pace(&mut estimator, 25, now);
+        estimator.on_feedback(&prompt, now);
+        assert_eq!(estimator.pace_bps(), pace, "the pace did not move");
+        assert_eq!(estimator.btlbw_bps(), btlbw, "the estimate did not move");
+        assert_eq!(estimator.mode(), mode, "the state machine did not step");
+        assert_eq!(estimator.prompt_report_count(), 1);
+        // The lane is alive: the prompt is a sign of life.
+        assert!(estimator.last_evidence_at().is_some());
     }
 
     #[test]

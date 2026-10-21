@@ -392,6 +392,11 @@ pub fn groups() -> Vec<Group> {
                 Entry::rule("assembly timeout", "3 x RTT + 500 ms", "§9.1"),
                 Entry::rule("report cadence", "clamp(4 x RTT, 250 ms, 2 s)", "§9.1"),
                 Entry::rule(
+                    "prompt report",
+                    "clamp(RTT / 4, 25 ms, 250 ms); an echo or a loss goes out at once",
+                    "§9.1",
+                ),
+                Entry::rule(
                     "session idle at the edge",
                     "clamp(2 x outage + 60 s, 120 s, 600 s); any inbound byte resets it",
                     "§9.1",
