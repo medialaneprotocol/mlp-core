@@ -875,6 +875,23 @@ impl BandwidthEstimator {
 
     /// Compute the current estimate (MLP spec §6.2.5).
     pub fn estimate(&self) -> Estimate {
+        self.estimate_with_pace_floor(0)
+    }
+
+    /// The estimate with the pace held to at least `floor_bps` (MLP spec §6.6).
+    ///
+    /// A running plan's remaining work is a **deadline-bound demand**: the plan
+    /// must finish inside `plan_deadline`, so the rate that carries it is the
+    /// rate the sender uses. A plan paced by the idle demand can never finish —
+    /// the receiver's picture stays incomplete, the acknowledgement that names
+    /// the applied update never arrives, and the echo grows behind it.
+    ///
+    /// The floor is the plan's own deadline and nothing more: the ceiling
+    /// still bounds it, and the goodput the plan exercises is what teaches the
+    /// estimator the link's capacity. The no-feedback safety net keeps its own
+    /// pace: without a sign of life the sender knows nothing about the link,
+    /// and a plan cannot be paced on a guess.
+    pub fn estimate_with_pace_floor(&self, floor_bps: u64) -> Estimate {
         let ceiling = self.ceiling();
         if self.no_feedback {
             // Design §7.2.8: floor × 2, one fps, small objects, no speculation.
@@ -895,6 +912,7 @@ impl BandwidthEstimator {
 
         let pace = self
             .pace_bps
+            .max(self.plan_floor(floor_bps))
             .clamp(self.config.pace_floor_bps as f64, ceiling) as u64;
         let mut target_fps = self.config.requested_fps.clamp(0.5, 30.0);
         let mut budget = self.budget_for(pace, target_fps, ceiling);
@@ -925,6 +943,23 @@ impl BandwidthEstimator {
 
     fn pace_bytes_for(&self, pace_bps: u64) -> f64 {
         pace_bps as f64 / 8.0
+    }
+
+    /// The pace floor a plan's demand may hold the estimate to.
+    ///
+    /// The floor is the sender's own rate for the work it owes, and it applies
+    /// only while the estimator's own state says the link has headroom. In
+    /// `Degraded` the link is struggling and in `Floor` it is at its floor: a
+    /// plan's deadline is the sender's problem to schedule, not a licence to
+    /// spend the link's capacity the estimator just measured as gone.
+    fn plan_floor(&self, floor_bps: u64) -> f64 {
+        if floor_bps == 0 {
+            return 0.0;
+        }
+        match self.state {
+            InternalState::StartUp | InternalState::Steady => floor_bps as f64,
+            InternalState::Degraded | InternalState::Floor => 0.0,
+        }
     }
 
     fn budget_for(&self, pace_bps: u64, target_fps: f64, _ceiling: f64) -> f64 {

@@ -2092,11 +2092,48 @@ impl MediaSenderMachine {
         }
     }
 
+    /// The rate a running plan must carry to finish inside its deadline
+    /// (MLP spec §6.6).
+    ///
+    /// The plan's remaining cells are the sender's demand while the plan
+    /// runs: the plan must finish inside `plan_deadline`, and a plan paced by
+    /// the idle demand never does. The rate is the plan's remaining bytes over
+    /// the deadline — the smallest rate that finishes it in time.
+    ///
+    /// The cell size is the sender's own configured estimate of what one cell
+    /// costs on the wire (`cell_bytes`), which is what the plan's own band
+    /// sizing uses; the raw cell size is only the ceiling a codec must
+    /// respect, and a demand built on the ceiling would ask the link for more
+    /// than it can carry.
+    fn plan_demand_bps(&self) -> Option<u64> {
+        let (_plan_id, remaining_cells, _reason) = self.scheduler.plans().active()?;
+        if remaining_cells == 0 {
+            return None;
+        }
+        let cell_bytes = self
+            .config
+            .scheduler
+            .cell_bytes_for(self.accounting.grid())
+            .max(1) as u64;
+        let deadline_ms = self.scheduler.plans().config().deadline_ms().max(1);
+        let bytes = u64::from(remaining_cells).saturating_mul(cell_bytes);
+        Some(bytes.saturating_mul(8).saturating_mul(1_000) / deadline_ms)
+    }
+
     fn refresh_estimate(&mut self, now: Instant) {
         if matches!(self.lane.state(), MediaLaneStateKind::Disabled) {
             return;
         }
-        let estimate = self.estimator.estimate();
+        // A running plan's outstanding work is the sender's demand (MLP spec
+        // §6.6): the plan must finish inside `plan_deadline`, so the rate that
+        // carries it is the rate the sender uses. A plan paced by the idle
+        // demand can never finish — the estimator measures the goodput the
+        // sender produced, and a sender that produces nothing measures a link
+        // that carries nothing (MLP spec §6.2.4).
+        let estimate = match self.plan_demand_bps() {
+            Some(demand_bps) => self.estimator.estimate_with_pace_floor(demand_bps),
+            None => self.estimator.estimate(),
+        };
         // A cap that dropped leaves the queue holding objects the sender may
         // no longer put on the wire: the estimate's cap is the sender's own
         // bound on what one object may carry, and an object admitted under
@@ -2226,6 +2263,52 @@ mod tests {
     fn sender_at(carrier: Carrier, now: Instant) -> MediaSenderMachine {
         let grid = CellGrid::with_cell_size(320, 240, 64);
         MediaSenderMachine::new(MediaSenderConfig::new(carrier, grid), grid, now)
+    }
+
+    #[test]
+    fn a_running_plan_is_the_senders_demand_and_carries_its_own_deadline() {
+        // MLP spec §6.6: the plan's outstanding work is the sender's demand
+        // while the plan runs. A plan paced by the idle demand can never
+        // finish inside its deadline - the estimator measures the goodput the
+        // sender produced (§6.2.4), and a sender that produces nothing
+        // measures a link that carries nothing.
+        let now = Instant::now();
+        let grid = CellGrid::with_cell_size(1920, 1080, 16);
+        let mut sender = MediaSenderMachine::new(
+            MediaSenderConfig::new(Carrier::Ws, grid),
+            grid,
+            now,
+        );
+        let idle_pace = sender.estimate().pace_bps;
+        assert!(
+            sender.plan_demand_bps().is_none(),
+            "no plan, no demand: the idle demand is the sender's own"
+        );
+
+        // The plan covers the whole grid, as an epoch change does.
+        sender.request_plan(PlanStartReason::Epoch);
+        let events = sender.poll_plans(now);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, MediaSenderEvent::PlanStarted { .. })),
+            "the plan starts"
+        );
+        let demand = sender
+            .plan_demand_bps()
+            .expect("a running plan has a demand");
+        assert!(demand > 0, "the demand is a rate");
+
+        // The estimate the update path uses now carries the plan's rate.
+        let _ = sender.poll_timeout(now);
+        let estimate = sender.estimate();
+        assert!(
+            estimate.pace_bps >= demand || estimate.pace_bps > idle_pace,
+            "the plan's rate is the sender's rate: {} against the idle {} and the demand {}",
+            estimate.pace_bps,
+            idle_pace,
+            demand
+        );
     }
 
     #[test]
