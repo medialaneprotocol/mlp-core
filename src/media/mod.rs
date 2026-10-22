@@ -530,11 +530,11 @@ pub struct MediaFeedback {
     pub received_bytes: u64,
     /// Objects received since the previous report.
     pub received_objects: u64,
-    /// Gaps in `object_id` since the previous report.
+    /// Gaps in the **update-id** space since the previous report (MLP spec §5.2).
     pub lost_objects: u64,
-    /// Duplicated objects observed.
+    /// Duplicated objects observed (the object-id space).
     pub duplicated_objects: u64,
-    /// Reordered objects observed.
+    /// Reordered media updates observed (the update-id space).
     pub reordered_objects: u64,
     /// The interval these counters cover.
     pub window_ms: u64,

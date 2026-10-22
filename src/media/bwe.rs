@@ -167,10 +167,16 @@ struct PendingProbe {
 }
 
 /// Loss attribution across hops (MLP spec §6.2.9).
+///
+/// The attribution is made in the **update-id space**, the space the
+/// receiver's loss is counted in (§5.2): the media updates the receiver never
+/// saw. A hop's report names the media objects it discarded, and a discarded
+/// object is one part of one media update — the content the receiver never
+/// saw. The two therefore account for the same losses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HopAttribution {
-    /// Loss reported by the receiver's object-id gap detection.
-    pub viewer_lost_objects: u64,
+    /// Loss reported by the receiver's update-id gap detection.
+    pub viewer_lost_updates: u64,
     /// Objects the intermediary reported dropping.
     pub relay_dropped: u64,
     /// Objects the edge reported dropping.
@@ -182,8 +188,11 @@ pub struct HopAttribution {
 impl HopAttribution {
     /// The unattributed remainder: the number that answers "is it the last
     /// mile or our stack?" (MLP spec §12).
-    pub fn link_lost_objects(&self) -> u64 {
-        self.viewer_lost_objects
+    ///
+    /// It is the receiver's loss minus what the hops claim, in the
+    /// update-id space both are counted in.
+    pub fn link_lost_updates(&self) -> u64 {
+        self.viewer_lost_updates
             .saturating_sub(self.relay_dropped + self.gateway_dropped + self.other_dropped)
     }
 }
@@ -488,7 +497,10 @@ impl BandwidthEstimator {
             loss = self.loss_ratio;
         }
         self.loss_ratio = loss;
-        self.attribution.viewer_lost_objects += feedback.lost_objects;
+        // The receiver's loss is counted in the update-id space (§5.2): the
+        // media updates it never saw. The attribution against the hops'
+        // reports is made in that space (§6.2.9).
+        self.attribution.viewer_lost_updates += feedback.lost_objects;
 
         // A window in which the sender sent less than its own pace was
         // application-limited: the link was never asked to carry more, so the
@@ -1426,10 +1438,37 @@ mod tests {
             now,
         );
         let attribution = estimator.attribution();
-        assert_eq!(attribution.viewer_lost_objects, 10);
+        assert_eq!(attribution.viewer_lost_updates, 10);
         assert_eq!(attribution.relay_dropped, 5);
         assert_eq!(attribution.gateway_dropped, 3);
-        assert_eq!(attribution.link_lost_objects(), 2);
+        assert_eq!(attribution.link_lost_updates(), 2);
+    }
+
+    #[test]
+    fn the_attribution_charges_the_hop_that_dropped_the_update() {
+        // The receiver's loss is counted in the update-id space (MLP spec
+        // §5.2): the media updates it never saw. The attribution is made in
+        // that space, so a hop that dropped the update is charged for it and
+        // the link is not.
+        let now = Instant::now();
+        let mut estimator = BandwidthEstimator::new(BweConfig::default());
+        estimator.on_feedback(&feedback(10, 100_000, 90, 1, 1_000), now);
+        estimator.on_hop_report(
+            &MediaHopReport {
+                hop: super::super::hop::FIRST,
+                objects_dropped: 1,
+                ..MediaHopReport::default()
+            },
+            now,
+        );
+        let attribution = estimator.attribution();
+        assert_eq!(attribution.viewer_lost_updates, 1);
+        assert_eq!(attribution.relay_dropped, 1);
+        assert_eq!(
+            attribution.link_lost_updates(),
+            0,
+            "the hop that dropped the update is charged for it"
+        );
     }
 
     #[test]

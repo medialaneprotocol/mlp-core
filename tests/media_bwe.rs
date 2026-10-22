@@ -342,10 +342,10 @@ fn hop_reports_are_subtracted_from_viewer_loss() {
         now,
     );
     let attribution = estimator.attribution();
-    assert_eq!(attribution.viewer_lost_objects, 20);
+    assert_eq!(attribution.viewer_lost_updates, 20);
     assert_eq!(attribution.relay_dropped, 10, "drops plus coalescing");
     assert_eq!(attribution.gateway_dropped, 4);
-    assert_eq!(attribution.link_lost_objects(), 6);
+    assert_eq!(attribution.link_lost_updates(), 6);
 }
 
 #[test]

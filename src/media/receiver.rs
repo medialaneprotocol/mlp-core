@@ -7,6 +7,14 @@
 //! `MediaAck`, the `MediaFeedback` window counters, probe echoes and RTT
 //! samples. Applying cells is the driver's job; idempotence by
 //! `(update_id, part_index)` is provided here as a service.
+//!
+//! **The loss accounting is in the update-id space** (MLP spec §5.2): the
+//! gaps that mean lost media are the gaps in the update-id sequence, because
+//! the update id is monotone per receiver. The object-id space is per sender
+//! and carries no loss meaning: a lane carries objects from several senders,
+//! and the moment an intermediary originates an object of its own, the jump
+//! between the media sender's ids and the intermediary's would read as lost
+//! media.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -32,6 +40,12 @@ pub const REPORT_PROMPT_CEILING_MS: u64 = 250;
 pub const REPORT_PROMPT_FACTOR: f64 = 0.25;
 /// How many applied `(update_id, part_index)` pairs are remembered.
 pub const APPLIED_CHUNK_WINDOW: usize = 512;
+/// How many update ids are remembered for the duplicate check.
+///
+/// The window is the receiver's own: an update id that fell out of it is
+/// forgotten, and a re-delivery of it would then be read as a new update.
+/// The window is wide enough that a re-delivery arrives inside it.
+pub const UPDATE_DEDUPE_WINDOW: usize = 4_096;
 /// How many outstanding probes a receiver keeps.
 pub const MAX_PENDING_PROBES: usize = 8;
 
@@ -109,9 +123,9 @@ pub struct ReceiverStats {
     pub duplicate_fragments: u64,
     /// Duplicate objects observed (`DUP` flag).
     pub duplicate_objects: u64,
-    /// Objects that arrived out of order.
+    /// Media updates that arrived out of order (the update-id space).
     pub reordered_objects: u64,
-    /// Gaps in `object_id` observed (the receiver's loss signal).
+    /// Gaps in the **update-id** space observed (the receiver's loss signal).
     pub lost_objects: u64,
     /// Fragments dropped by an explicit deadline.
     pub expired: u64,
@@ -142,7 +156,16 @@ pub struct MediaReceiverMachine {
     assembler: ObjectAssembler,
     started: Instant,
     stats: ReceiverStats,
-    expected_object_id: Option<u32>,
+    /// The highest media update id seen, in the update-id space.
+    ///
+    /// The update id is the protocol's identity of a media update, and it is
+    /// the only space in which a gap means a lost update (MLP spec §5.1.1,
+    /// §5.2). The object id cannot carry that meaning: its space is per
+    /// sender, and a lane carries objects from several senders.
+    highest_update_id: Option<u64>,
+    /// The update ids seen, for the duplicate check.
+    seen_update_ids: VecDeque<u64>,
+    seen_update_set: HashSet<u64>,
     /// Largest update epoch seen.
     epoch: u32,
     /// The sender's advertised pace (from the `PACE_BPS` TLV).
@@ -207,7 +230,9 @@ impl MediaReceiverMachine {
             config,
             started: now,
             stats: ReceiverStats::default(),
-            expected_object_id: None,
+            highest_update_id: None,
+            seen_update_ids: VecDeque::new(),
+            seen_update_set: HashSet::new(),
             epoch: 0,
             advertised_pace_bps: None,
             advertised_budget_bytes: None,
@@ -386,9 +411,6 @@ impl MediaReceiverMachine {
         let mut events = Vec::new();
         for fragment in fragments {
             self.stats.fragments += 1;
-            let object_id = fragment.header.object_id;
-            let first_of_object = fragment.header.fragment_index == 0;
-            let was_known = self.assembler.open_class(object_id).is_some();
             // Track the advertised diagnostics before assembly (they arrive on
             // the first fragment of a media object).
             if let Some(pace) = fragment.ext.pace_bps() {
@@ -398,15 +420,14 @@ impl MediaReceiverMachine {
                 self.advertised_budget_bytes = Some(budget);
             }
             match self.assembler.accept(fragment, session_ms, now) {
-                AssemblyOutcome::Pending => {
-                    if first_of_object && !was_known {
-                        self.note_new_object(object_id);
-                    }
-                }
+                // The object is not whole yet: nothing is accounted for it.
+                AssemblyOutcome::Pending => {}
                 AssemblyOutcome::Object(object) => {
-                    if first_of_object && !was_known {
-                        self.note_new_object(object_id);
-                    }
+                    // The loss accounting is made in the update-id space (MLP
+                    // spec §5.2), and a media update is accounted when the
+                    // object that carries it is whole: an update the receiver
+                    // never saw whole is an update it never saw.
+                    self.note_media_update(protocol_update_id(&object));
                     if object.ext.chain_epoch().unwrap_or(self.epoch) > self.epoch {
                         self.epoch = object.ext.chain_epoch().unwrap_or(self.epoch);
                     }
@@ -739,29 +760,56 @@ impl MediaReceiverMachine {
         core::mem::take(&mut self.pending_echoes)
     }
 
-    fn note_new_object(&mut self, object_id: u32) {
-        match self.expected_object_id {
-            None => {}
-            Some(expected) => {
-                if object_id > expected {
-                    let lost = u64::from(object_id - expected);
-                    self.stats.lost_objects += lost;
-                    self.window_lost += lost;
-                } else if object_id < expected {
-                    self.stats.reordered_objects += 1;
-                    self.window_reordered += 1;
+    /// Account one media update in the **update-id** space (MLP spec §5.2).
+    ///
+    /// The update id is the protocol's identity of a media update: it is
+    /// monotone per receiver, so a gap in it is a media update the receiver
+    /// never saw. The object id cannot carry that meaning — its space is per
+    /// sender (§5.1.1), and a lane carries objects from several senders: the
+    /// media sender and the intermediaries that originate their own objects
+    /// (a hop report, a lane error, a close). Read as a gap in the media
+    /// sender's object-id sequence, an intermediary's own object is billions
+    /// of lost objects.
+    ///
+    /// An object that carries no update id is not a media update the protocol
+    /// accounts for: it is counted as neither lost nor reordered. An update
+    /// the receiver already holds is a duplicate, never a gap.
+    fn note_media_update(&mut self, update_id: Option<u64>) {
+        let Some(update_id) = update_id else {
+            return;
+        };
+        if self.seen_update_set.contains(&update_id) {
+            // A re-delivery of an update the receiver already holds is a
+            // duplicate, and the object-id dedupe has already counted it.
+            return;
+        }
+        if let Some(highest) = self.highest_update_id {
+            if update_id > highest {
+                let gap = update_id - highest - 1;
+                if gap > 0 {
+                    self.stats.lost_objects += gap;
+                    self.window_lost += gap;
                 }
+            } else {
+                // An update that overtook a newer one on the wire is
+                // reordered, never lost. The expectation never moves back,
+                // or every later update would look like a lost one
+                // (MLP spec §6.2.2).
+                self.stats.reordered_objects += 1;
+                self.window_reordered += 1;
             }
         }
-        // The expectation only ever moves forward: a lane's writer drains
-        // strictly by priority (D-3), so an object may overtake an older one
-        // on the wire. An overtaken object is reordered, never a gap — and a
-        // reordered object must not lower the expectation, or every later
-        // object would look like a lost one (MLP spec §6.2.2).
-        self.expected_object_id = Some(match self.expected_object_id {
-            Some(expected) if expected > object_id => expected,
-            _ => object_id.saturating_add(1),
+        self.highest_update_id = Some(match self.highest_update_id {
+            Some(highest) => highest.max(update_id),
+            None => update_id,
         });
+        self.seen_update_set.insert(update_id);
+        self.seen_update_ids.push_back(update_id);
+        while self.seen_update_ids.len() > UPDATE_DEDUPE_WINDOW {
+            if let Some(old) = self.seen_update_ids.pop_front() {
+                self.seen_update_set.remove(&old);
+            }
+        }
     }
 
     fn observe_rtt(&mut self, sample: f64) {
@@ -806,6 +854,19 @@ fn class_slot(class: FragmentClass) -> usize {
         FragmentClass::Feedback => 3,
         FragmentClass::Path => 4,
     }
+}
+
+/// The protocol's update id of a media object, when it carries one.
+///
+/// Only a **media** object carries one: the update id is the media sender's
+/// own numbering of its media updates (MLP spec §5.1.1), and an intermediary's
+/// own object — a hop report, a lane error, a close — is numbered by the
+/// intermediary. The update ids start at 1, so the id 0 names no update.
+fn protocol_update_id(object: &MediaObject) -> Option<u64> {
+    if object.class != FragmentClass::Media {
+        return None;
+    }
+    object.ext.update_id().filter(|update_id| *update_id >= 1)
 }
 
 /// The last RTT sample, for diagnostics.
@@ -861,6 +922,22 @@ mod tests {
         .expect("valid fragment")
     }
 
+    /// An object an intermediary originated: its own object id, its own
+    /// class, and no update id (the update id is the media sender's).
+    fn intermediary_fragment(object_id: u32) -> Fragment {
+        Fragment::new(
+            FragmentClass::Feedback,
+            FragmentFlags::FIN,
+            Priority::REPORT,
+            object_id,
+            0,
+            1,
+            HeaderExt::new(),
+            vec![0; 8],
+        )
+        .expect("valid fragment")
+    }
+
     #[test]
     fn a_message_yields_a_complete_object_and_counters() {
         let now = Instant::now();
@@ -907,12 +984,14 @@ mod tests {
     }
 
     #[test]
-    fn gap_detection_counts_lost_objects() {
+    fn gap_detection_counts_lost_updates() {
         let now = Instant::now();
         let mut receiver = receiver_at(Carrier::Ws, now);
+        // The loss accounting is in the update-id space (MLP spec §5.2):
+        // update 1 arrives, update 2 never does, and update 3 arrives. The
+        // object ids are the media sender's own and carry no loss meaning.
         let first = media_fragment(1, 1, 0, 1, vec![0]);
         receiver.on_message(&first.encode(), now);
-        // Object 2 is lost; object 3 arrives.
         let third = media_fragment(3, 3, 0, 1, vec![0]);
         receiver.on_message(&third.encode(), now);
         assert_eq!(receiver.stats().lost_objects, 1);
@@ -932,6 +1011,71 @@ mod tests {
             receiver.report_interval().as_millis() as u64
         );
         assert_eq!(receiver.build_feedback(now).lost_objects, 0);
+    }
+
+    #[test]
+    fn an_intermediaries_own_object_id_is_not_loss() {
+        // A lane carries objects from several senders: the media sender and
+        // the intermediaries that originate their own objects (a hop report, a
+        // lane error, a close). Each numbers its own objects, so the jump
+        // between the media sender's ids and the intermediary's is not a lost
+        // media update — it is an object from another sender (MLP spec
+        // §5.1.1, §5.2).
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        let first = media_fragment(1, 10, 0, 1, vec![0]);
+        receiver.on_message(&first.encode(), now);
+        let second = media_fragment(2, 11, 0, 1, vec![0]);
+        receiver.on_message(&second.encode(), now);
+        // The intermediary's own object, from its own counter.
+        let hop_report = intermediary_fragment(0x8000_0000);
+        receiver.on_message(&hop_report.encode(), now);
+        assert_eq!(receiver.stats().lost_objects, 0);
+        assert_eq!(receiver.stats().reordered_objects, 0);
+        // The media updates around it are still accounted in their own space:
+        // a genuine gap is still a loss.
+        let later = media_fragment(3, 14, 0, 1, vec![0]);
+        receiver.on_message(&later.encode(), now);
+        assert_eq!(receiver.stats().lost_objects, 2);
+        assert_eq!(receiver.stats().reordered_objects, 0);
+    }
+
+    #[test]
+    fn an_update_id_repeat_is_a_duplicate_and_not_a_gap() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        // The same update arrives twice, under two object ids: a
+        // re-delivery, which the object-id dedupe already counts as a
+        // duplicate. It is not a gap, and it is not a reordering.
+        let first = media_fragment(1, 10, 0, 1, vec![0]);
+        receiver.on_message(&first.encode(), now);
+        let again = media_fragment(2, 10, 0, 1, vec![0]);
+        receiver.on_message(&again.encode(), now);
+        assert_eq!(receiver.stats().lost_objects, 0);
+        assert_eq!(receiver.stats().reordered_objects, 0);
+        // The object id's own space still deduplicates: the repeat is
+        // counted as the duplicate it is.
+        let mut duplicate = media_fragment(1, 10, 0, 1, vec![0]);
+        duplicate.header.flags = FragmentFlags::DUP.union(FragmentFlags::FIN);
+        receiver.on_message(&duplicate.encode(), now);
+        assert_eq!(receiver.stats().duplicate_fragments, 1);
+        assert_eq!(receiver.stats().lost_objects, 0);
+    }
+
+    #[test]
+    fn a_media_update_that_overtakes_a_newer_one_is_reordered() {
+        let now = Instant::now();
+        let mut receiver = receiver_at(Carrier::Ws, now);
+        let first = media_fragment(1, 10, 0, 1, vec![0]);
+        receiver.on_message(&first.encode(), now);
+        let third = media_fragment(3, 12, 0, 1, vec![0]);
+        receiver.on_message(&third.encode(), now);
+        // Update 11 overtook update 12 on the wire: reordered, and the gap
+        // between 10 and 12 is the one lost update.
+        let second = media_fragment(2, 11, 0, 1, vec![0]);
+        receiver.on_message(&second.encode(), now);
+        assert_eq!(receiver.stats().reordered_objects, 1);
+        assert_eq!(receiver.stats().lost_objects, 1);
     }
 
     #[test]
@@ -1044,11 +1188,12 @@ mod tests {
     fn a_loss_is_a_report_the_sender_cannot_wait_for() {
         let now = Instant::now();
         let mut receiver = receiver_at(Carrier::Ws, now);
-        // A gap in the object id space: the receiver observed a loss.
+        // A gap in the update-id space: the receiver observed a loss. Update 1
+        // arrives, updates 2 and 3 never do, and update 4 does.
         let first = media_fragment(9, 1, 0, 1, vec![0; 10]);
         let _ = receiver.on_message(&first.encode(), now);
         let later = now + Duration::from_millis(10);
-        let second = media_fragment(12, 2, 0, 1, vec![0; 10]);
+        let second = media_fragment(12, 4, 0, 1, vec![0; 10]);
         let _ = receiver.on_message(&second.encode(), later);
         assert_eq!(receiver.stats().lost_objects, 2);
         assert!(receiver.prompt_pending());
