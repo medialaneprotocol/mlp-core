@@ -384,6 +384,14 @@ pub struct CellAccounting {
     last_applied_update_id: u64,
     last_sent_update_id: u64,
     last_ack_at_ms: Option<u64>,
+    /// The session-relative ms of the last **progress**: the moment the
+    /// receiver's applied-update watermark advanced.
+    ///
+    /// This is the freshness fact of MLP spec §6.7.1 — the content
+    /// advanced. `last_ack_at_ms` is a different fact: an acknowledgement
+    /// says the lane is alive, and a lane can be alive with a content that
+    /// stands still.
+    last_progress_at_ms: Option<u64>,
     counters: CellCounters,
     stuck_cells: Vec<u32>,
 }
@@ -401,6 +409,7 @@ impl CellAccounting {
             last_applied_update_id: 0,
             last_sent_update_id: 0,
             last_ack_at_ms: None,
+            last_progress_at_ms: None,
             counters: CellCounters::default(),
             stuck_cells: Vec::new(),
         }
@@ -586,6 +595,9 @@ impl CellAccounting {
         }
         if effective > self.last_applied_update_id {
             self.last_applied_update_id = effective;
+            // The content advanced: this is the progress the lane's freshness
+            // is measured against (MLP spec §6.7.1).
+            self.last_progress_at_ms = Some(now_ms);
         }
         // The stuck set is recomputed from the current truth.
         self.stuck_cells
@@ -712,6 +724,16 @@ impl CellAccounting {
         self.last_ack_at_ms
     }
 
+    /// The session time of the last **progress**: the moment the receiver's
+    /// applied-update watermark advanced (MLP spec §6.7.1).
+    ///
+    /// The lane's freshness is measured against this and not against the
+    /// last acknowledgement: an acknowledgement that names no new update
+    /// says the lane is alive, and the lane's state is about the content.
+    pub fn last_progress_at_ms(&self) -> Option<u64> {
+        self.last_progress_at_ms
+    }
+
     /// The number of update records in the ring.
     pub fn ring_len(&self) -> usize {
         self.ring.len()
@@ -763,6 +785,7 @@ impl CellAccounting {
         self.last_applied_update_id = 0;
         self.last_sent_update_id = 0;
         self.last_ack_at_ms = None;
+        self.last_progress_at_ms = None;
         self.stuck_cells.clear();
     }
 }

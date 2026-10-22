@@ -208,16 +208,31 @@ pub struct LaneEvidence {
     pub converged: bool,
     /// The pending cell fraction (`0.0..=1.0`).
     pub pending_fraction: f64,
-    /// Session-relative ms of the last ack, when any.
-    pub last_ack_ms: Option<u64>,
+    /// Session-relative ms of the last **progress** — the moment the
+    /// receiver's applied-update watermark advanced — when any.
+    ///
+    /// This is the freshness fact of MLP spec §6.7.1: the content advanced.
+    /// The arrival of an acknowledgement is not the same fact: an
+    /// acknowledgement that names no new update says the lane is alive, and
+    /// the lane's state is about the content, not about the carrier.
+    pub last_progress_ms: Option<u64>,
+    /// The staleness budget: `3 × (report_interval + 1 s)` (MLP spec
+    /// §6.7.1). The same budget the receiver applies to its own view, so
+    /// the two ends decide the same fact against the same threshold.
+    pub stale_budget_ms: u64,
     /// Whether the receiver reported decode-bound feedback.
     pub decode_bound: bool,
     /// Whether the estimator is in `NoFeedback`.
     pub no_feedback: bool,
-    /// Pace below which the link counts as degraded (the pace floor × 8).
-    pub degraded_below_bps: u64,
-    /// The current pace.
-    pub pace_bps: u64,
+    /// The receiver's attributed loss ratio (MLP spec §6.2.9): the share of
+    /// the media updates the receiver never saw.
+    ///
+    /// This is the quality fact of MLP spec §6.7.1, and it is the only one
+    /// both ends hold: the receiver measures it, the sender reads the same
+    /// number from the feedback.
+    pub loss_ratio: f64,
+    /// The loss above which the lane is degraded (`loss_degraded`, 5 %).
+    pub loss_degraded: f64,
 }
 
 impl Default for LaneEvidence {
@@ -230,14 +245,19 @@ impl Default for LaneEvidence {
             parked: false,
             converged: false,
             pending_fraction: 0.0,
-            last_ack_ms: None,
+            last_progress_ms: None,
+            stale_budget_ms: STALE_BUDGET_FLOOR_MS,
             decode_bound: false,
             no_feedback: false,
-            degraded_below_bps: 64_000,
-            pace_bps: 1_000_000,
+            loss_ratio: 0.0,
+            loss_degraded: super::bwe::LOSS_DEGRADED,
         }
     }
 }
+
+/// The staleness budget's floor: `3 × (report_interval + 1 s)` with the
+/// report interval at its own floor of 250 ms (MLP spec §6.7.1).
+pub const STALE_BUDGET_FLOOR_MS: u64 = STALE_ACK_WINDOWS * (250 + 1_000);
 
 /// Staleness above which the lane is reported `Stale` (in units of
 /// `report_interval + 1 s`).
@@ -319,6 +339,12 @@ impl LaneLifecycle {
     /// The state vocabulary is the honest degradation ladder of MLP spec §8:
     /// `Disabled`/`MediaUnsupported` are terminal, `Parked` is a deliberate
     /// hold, and the live states differ only in what they claim.
+    ///
+    /// The rule that decides each of them is MLP spec §6.7.1: the content's
+    /// **freshness** decides `Stale`, its **convergence** decides
+    /// `Converging`, and its **loss** decides `Degraded`. The sender's pace
+    /// is not among them: the pace is the sender's output, and a sender
+    /// with little to send sits at the pace floor on a perfect link.
     pub fn update(&mut self, evidence: &LaneEvidence) -> Option<MediaLaneStateKind> {
         let next = if let Some(reason) = evidence.unsupported {
             Some((
@@ -334,7 +360,7 @@ impl LaneLifecycle {
         } else if evidence.no_feedback {
             Some((MediaLaneStateKind::NoFeedback, "no_feedback".into()))
         } else if Self::is_stale(evidence) {
-            Some((MediaLaneStateKind::Stale, "no_ack_progress".into()))
+            Some((MediaLaneStateKind::Stale, "no_progress".into()))
         } else if evidence.decode_bound {
             Some((
                 MediaLaneStateKind::DecodeBound,
@@ -348,8 +374,8 @@ impl LaneLifecycle {
                     (evidence.pending_fraction * 100.0).round() as u32
                 ),
             ))
-        } else if evidence.pace_bps < evidence.degraded_below_bps {
-            Some((MediaLaneStateKind::Degraded, "below_nominal".into()))
+        } else if evidence.loss_ratio > evidence.loss_degraded {
+            Some((MediaLaneStateKind::Degraded, "content_loss".into()))
         } else {
             Some((MediaLaneStateKind::Live, "live".into()))
         };
@@ -371,11 +397,13 @@ impl LaneLifecycle {
     }
 
     fn is_stale(evidence: &LaneEvidence) -> bool {
-        match evidence.last_ack_ms {
-            // The staleness budget is the same shape as the capture stall
-            // window: 3 ack windows + 250 ms, expressed in ms here.
-            Some(last) => evidence.now_ms.saturating_sub(last) > 3_000,
-            None => evidence.now_ms > 3_000,
+        // The freshness fact of MLP spec §6.7.1: the content has not
+        // advanced within the staleness budget. The budget is the receiver's
+        // own, scaled to the link's reporting cadence, so the two ends
+        // measure one fact against one threshold.
+        match evidence.last_progress_ms {
+            Some(last) => evidence.now_ms.saturating_sub(last) > evidence.stale_budget_ms,
+            None => evidence.now_ms > evidence.stale_budget_ms,
         }
     }
 
@@ -597,7 +625,7 @@ mod tests {
             now_ms: 100,
             handshaken: true,
             converged: true,
-            pace_bps: 10_000_000,
+            last_progress_ms: Some(100),
             ..LaneEvidence::default()
         };
         assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Live));
@@ -636,7 +664,7 @@ mod tests {
             handshaken: true,
             converged: false,
             pending_fraction: 0.8,
-            pace_bps: 10_000_000,
+            last_progress_ms: Some(0),
             ..LaneEvidence::default()
         };
         assert_eq!(
@@ -652,17 +680,81 @@ mod tests {
     }
 
     #[test]
-    fn stale_after_ack_silence() {
+    fn stale_after_the_content_stops_advancing() {
         let mut lane = LaneLifecycle::new();
         let evidence = LaneEvidence {
             now_ms: 10_000,
             handshaken: true,
             converged: true,
-            last_ack_ms: Some(0),
-            pace_bps: 10_000_000,
+            last_progress_ms: Some(0),
+            stale_budget_ms: 3_750,
             ..LaneEvidence::default()
         };
         assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Stale));
+    }
+
+    #[test]
+    fn an_acknowledgement_that_names_no_new_update_is_not_progress() {
+        // The lane is alive — an acknowledgement arrived — but the content
+        // did not advance, so the lane is stale (MLP spec §6.7.1). The
+        // sender sees this as the watermark standing still; the receiver
+        // sees the same fact as no update applied.
+        let mut lane = LaneLifecycle::new();
+        let evidence = LaneEvidence {
+            now_ms: 4_000,
+            handshaken: true,
+            converged: true,
+            last_progress_ms: Some(0),
+            stale_budget_ms: 3_750,
+            ..LaneEvidence::default()
+        };
+        assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Stale));
+    }
+
+    #[test]
+    fn fresh_content_is_live_whatever_the_pace_is() {
+        // The pace is the sender's output, not a measurement of the link: a
+        // sender with a static surface sits at the pace floor on a perfect
+        // link, and the lane is still live (MLP spec §6.7.1).
+        let mut lane = LaneLifecycle::new();
+        let evidence = LaneEvidence {
+            now_ms: 1_000,
+            handshaken: true,
+            converged: true,
+            last_progress_ms: Some(1_000),
+            loss_ratio: 0.0,
+            ..LaneEvidence::default()
+        };
+        assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Live));
+    }
+
+    #[test]
+    fn lost_content_is_degraded() {
+        let mut lane = LaneLifecycle::new();
+        let evidence = LaneEvidence {
+            now_ms: 1_000,
+            handshaken: true,
+            converged: true,
+            last_progress_ms: Some(1_000),
+            loss_ratio: 0.2,
+            ..LaneEvidence::default()
+        };
+        assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Degraded));
+        assert_eq!(lane.detail(), "content_loss");
+    }
+
+    #[test]
+    fn the_loss_below_the_threshold_is_not_degraded() {
+        let mut lane = LaneLifecycle::new();
+        let evidence = LaneEvidence {
+            now_ms: 1_000,
+            handshaken: true,
+            converged: true,
+            last_progress_ms: Some(1_000),
+            loss_ratio: 0.01,
+            ..LaneEvidence::default()
+        };
+        assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Live));
     }
 
     #[test]
@@ -672,7 +764,7 @@ mod tests {
             handshaken: true,
             converged: true,
             decode_bound: true,
-            pace_bps: 10_000_000,
+            last_progress_ms: Some(0),
             ..LaneEvidence::default()
         };
         assert_eq!(lane.update(&decode), Some(MediaLaneStateKind::DecodeBound));
@@ -693,7 +785,7 @@ mod tests {
         let parked = LaneEvidence {
             handshaken: true,
             parked: true,
-            pace_bps: 10_000_000,
+            last_progress_ms: Some(0),
             ..LaneEvidence::default()
         };
         assert_eq!(lane.update(&parked), Some(MediaLaneStateKind::Parked));
@@ -704,18 +796,11 @@ mod tests {
     }
 
     #[test]
-    fn slow_pace_without_convergence_is_degraded_not_stale() {
-        let mut lane = LaneLifecycle::new();
-        let evidence = LaneEvidence {
-            now_ms: 500,
-            handshaken: true,
-            converged: true,
-            last_ack_ms: Some(400),
-            pace_bps: 20_000,
-            degraded_below_bps: 64_000,
-            ..LaneEvidence::default()
-        };
-        assert_eq!(lane.update(&evidence), Some(MediaLaneStateKind::Degraded));
+    fn the_staleness_budget_is_the_receivers_own() {
+        // The budget is `3 × (report_interval + 1 s)`, so it scales with the
+        // link's cadence: a lane at the report interval's floor is stale
+        // after 3.75 s, and a lane at T4's 2 s cadence after 9 s.
+        assert_eq!(STALE_BUDGET_FLOOR_MS, 3_750);
     }
 
     #[test]

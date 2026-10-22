@@ -20,6 +20,7 @@ use super::error::RejectReason;
 use super::input::InputToken;
 use super::lifecycle::{
     LaneEvidence, LaneLifecycle, MediaCloseCode, MediaLanePolicy, MediaLaneStateKind,
+    STALE_ACK_WINDOWS,
 };
 use super::pacer::{AcquireResult, MediaPacer, PacerConfig};
 use super::pdu::{
@@ -1540,19 +1541,30 @@ impl MediaSenderMachine {
             parked: false,
             converged: self.accounting.converged(),
             pending_fraction: self.accounting.stale_fraction(),
-            last_ack_ms: self.accounting.last_ack_at_ms(),
+            // The freshness fact: the content advanced, not "an
+            // acknowledgement arrived" (MLP spec §6.7.1).
+            last_progress_ms: self.accounting.last_progress_at_ms(),
+            stale_budget_ms: self.stale_budget_ms(),
             decode_bound: false,
             no_feedback: matches!(self.last_estimate.mode, super::bwe::BweMode::NoFeedback),
-            // A pace with no measurement behind it is a prior, not a verdict:
-            // only a session that has heard from the receiver can be "below
-            // nominal".
-            degraded_below_bps: if self.stats.feedback_applied > 0 {
-                64_000
-            } else {
-                0
-            },
-            pace_bps: self.last_estimate.pace_bps,
+            // The quality fact: the content the receiver never saw. The
+            // pace is not evidence — it is this sender's output, and a
+            // sender with little to send sits at the pace floor on a perfect
+            // link (MLP spec §6.7.1).
+            loss_ratio: self.last_estimate.loss_ratio,
+            loss_degraded: super::bwe::LOSS_DEGRADED,
         }
+    }
+
+    /// The staleness budget: `3 × (report_interval + 1 s)` (MLP spec
+    /// §6.7.1).
+    ///
+    /// The budget is the receiver's own, scaled to the link's reporting
+    /// cadence, so the two ends decide the same fact against the same
+    /// threshold.
+    fn stale_budget_ms(&self) -> u64 {
+        let report_interval_ms = self.estimator.report_interval().as_millis() as u64;
+        STALE_ACK_WINDOWS * (report_interval_ms + 1_000)
     }
 
     /// Refresh the lane state and emit the change.

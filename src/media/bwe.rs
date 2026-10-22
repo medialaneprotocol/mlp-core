@@ -234,6 +234,15 @@ impl InternalState {
 /// confirm.
 pub const PROBE_STEP_HEADROOM: f64 = 1.25;
 
+/// The loss above which the link counts as degraded (MLP spec §6.2.4,
+/// §6.7.1).
+///
+/// The number is one, and it is the same number in both places: the
+/// estimator's `Degraded` mode and the lane's `DEGRADED` state are decided
+/// by the same threshold on the same measurement — the receiver's attributed
+/// loss in the update-id space.
+pub const LOSS_DEGRADED: f64 = 0.05;
+
 /// The bandwidth estimator (MLP spec §6.2).
 ///
 /// Deterministic: every measurement derives from injected [`Instant`]s and the
@@ -634,7 +643,7 @@ impl BandwidthEstimator {
             }
             InternalState::Steady => {
                 self.pace_bps = 0.9 * self.btlbw_bps;
-                if loss > 0.05 || self.queue_delay_ms > 1.0 * self.rtt_min_ms {
+                if loss > LOSS_DEGRADED || self.queue_delay_ms > 1.0 * self.rtt_min_ms {
                     self.transition(InternalState::Degraded);
                 }
             }
