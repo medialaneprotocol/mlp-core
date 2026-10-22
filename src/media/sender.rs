@@ -130,6 +130,14 @@ pub struct SenderStats {
     pub superseded_total: u64,
     /// Objects deferred by the in-flight cap.
     pub in_flight_deferred_total: u64,
+    /// Echo-critical objects that took a queued object's place instead of
+    /// being deferred by the in-flight cap (MLP spec §6.3.5).
+    ///
+    /// The echo's carrier is not the bulk: it is the object that carries the
+    /// input sequence the receiver answers, and the echo's promise is a
+    /// quarter of a round trip (annex INV-8). A carrier that is refused
+    /// because the bulk filled the write queue loses the echo with it.
+    pub echo_critical_replacements_total: u64,
     /// Objects dropped when the release queue hit its bound.
     pub queue_overflow_drops_total: u64,
     /// In-flight entries force-freed after `max_in_flight_wait`.
@@ -908,10 +916,22 @@ impl MediaSenderMachine {
         // waiting for the carrier at once.
         self.reap_write_queue(now);
         if self.pending_writes() >= self.config.in_flight_cap {
-            self.stats.in_flight_deferred_total += 1;
-            return EnqueueOutcome::Deferred {
-                reason: RejectReason::InFlightCap,
-            };
+            // The **echo's carrier** is not the bulk (MLP spec §6.3.5): it is
+            // the object that carries the input sequence the receiver answers,
+            // and the echo's promise is a quarter of a round trip (annex
+            // INV-8). A carrier that waits behind the bulk behind it misses
+            // that promise, so the carrier takes the oldest queued object's
+            // place instead of being refused: the bulk's object is the one
+            // that may be dropped, because the cells it carries are re-encoded
+            // by the repair plan (§6.6) and no echo is owed for it.
+            if update.echo_critical && self.take_echo_critical_place() {
+                self.stats.echo_critical_replacements_total += 1;
+            } else {
+                self.stats.in_flight_deferred_total += 1;
+                return EnqueueOutcome::Deferred {
+                    reason: RejectReason::InFlightCap,
+                };
+            }
         }
         if !self.admit() {
             return EnqueueOutcome::Deferred {
@@ -1863,8 +1883,8 @@ impl MediaSenderMachine {
     /// coupling the pacer exists to prevent).
     fn pick_object(&self, now: Instant) -> Option<usize> {
         let session_ms = self.session_ms(now);
-        let mut best: Option<(usize, u8, Instant)> = None;
-        let mut deferred_fit: Option<(usize, u8, Instant)> = None;
+        let mut best: Option<(usize, u8, bool, Instant)> = None;
+        let mut deferred_fit: Option<(usize, u8, bool, Instant)> = None;
         for (index, object) in self.objects.iter().enumerate() {
             if object.is_released() {
                 continue;
@@ -1876,6 +1896,12 @@ impl MediaSenderMachine {
                 continue;
             }
             let priority = object.priority.get();
+            // The echo's carrier is released before the bulk it would otherwise
+            // wait behind (MLP spec §6.3.5): the carrier carries the input
+            // sequence the receiver answers, and the echo's promise is a
+            // quarter of a round trip (annex INV-8). The bulk is the traffic
+            // that may wait.
+            let echo_critical = object.echo_critical;
             let fits = self
                 .build_fragment(index)
                 .map(|fragment| {
@@ -1883,22 +1909,24 @@ impl MediaSenderMachine {
                         .can_acquire(object.traffic, fragment.len() as u64)
                 })
                 .unwrap_or(false);
-            let is_better = |candidate: Option<(usize, u8, Instant)>| match candidate {
+            let is_better = |candidate: Option<(usize, u8, bool, Instant)>| match candidate {
                 None => true,
-                Some((_, best_priority, best_at)) => {
+                Some((_, best_priority, best_echo, best_at)) => {
                     priority < best_priority
-                        || (priority == best_priority && object.enqueued_at < best_at)
+                        || (priority == best_priority
+                            && (echo_critical && !best_echo
+                                || (echo_critical == best_echo && object.enqueued_at < best_at)))
                 }
             };
             if fits {
                 if is_better(best) {
-                    best = Some((index, priority, object.enqueued_at));
+                    best = Some((index, priority, echo_critical, object.enqueued_at));
                 }
             } else if is_better(deferred_fit) {
-                deferred_fit = Some((index, priority, object.enqueued_at));
+                deferred_fit = Some((index, priority, echo_critical, object.enqueued_at));
             }
         }
-        best.or(deferred_fit).map(|(index, _, _)| index)
+        best.or(deferred_fit).map(|(index, _, _, _)| index)
     }
 
     fn build_fragment(&self, index: usize) -> Option<Vec<u8>> {
@@ -2001,6 +2029,36 @@ impl MediaSenderMachine {
             } else {
                 index += 1;
             }
+        }
+    }
+
+    /// Make room in the write queue for the echo's carrier (MLP spec §6.3.5).
+    ///
+    /// The oldest queued **media** object gives its place: the bulk's object
+    /// is the one the queue may drop, because its cells are re-encoded by the
+    /// repair plan (§6.6) and no echo is owed for it. An echo-critical object
+    /// is never the one that gives way — a second carrier would have to wait
+    /// for the first one's answer, and the answer is the promise.
+    ///
+    /// Returns whether room was made.
+    fn take_echo_critical_place(&mut self) -> bool {
+        let candidate = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                object.update_id.is_some() && !object.is_released() && !object.echo_critical
+            })
+            .min_by_key(|(_, object)| object.enqueued_at)
+            .map(|(index, _)| index);
+        match candidate {
+            Some(index) => {
+                self.objects.remove(index);
+                self.stats.in_flight_evictions_total += 1;
+                self.reindex_slots(index);
+                true
+            }
+            None => false,
         }
     }
 
@@ -2311,6 +2369,36 @@ mod tests {
         assert!(sender.in_flight() <= 1);
         let accepted = sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![6]), now);
         assert!(matches!(accepted, EnqueueOutcome::Accepted { .. }));
+    }
+
+    /// §6.3.5: the echo's carrier is not the bulk. A write queue the bulk
+    /// filled must not refuse the carrier, and the carrier must not wait
+    /// behind the bulk it would otherwise be queued with.
+    #[test]
+    fn the_echo_carrier_is_not_lost_behind_the_bulk_and_goes_first() {
+        let now = Instant::now();
+        let mut sender = sender(Carrier::Ws);
+        // The bulk fills the write queue.
+        for index in 0..2u32 {
+            let outcome =
+                sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![index]), now);
+            assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+        }
+        // The carrier takes the oldest queued object's place: it is not lost.
+        let mut carrier = UpdateRequest::delta(vec![4, 5, 6], vec![9]);
+        carrier.echo_critical = true;
+        let outcome = sender.enqueue_update(carrier, now);
+        let EnqueueOutcome::Accepted { object_id, .. } = outcome else {
+            panic!("the echo's carrier is accepted, not deferred");
+        };
+        assert_eq!(sender.stats().echo_critical_replacements_total, 1);
+        assert_eq!(sender.stats().in_flight_deferred_total, 0);
+        // And it is released before the bulk it queued with.
+        let fragment = sender.poll_fragment(now).expect("a fragment");
+        assert_eq!(
+            fragment.object_id, object_id,
+            "the carrier is released before the bulk"
+        );
     }
 
     #[test]
