@@ -52,6 +52,36 @@ pub struct PacerConfig {
 }
 
 impl PacerConfig {
+    /// Set the pace in bps.
+    pub fn with_pace_bps(mut self, bps: u64) -> Self {
+        self.pace_bps = bps;
+        self
+    }
+
+    /// Set the max object bytes.
+    pub fn with_max_object_bytes(mut self, bytes: u32) -> Self {
+        self.max_object_bytes = bytes;
+        self
+    }
+
+    /// Set the reserved floor bps.
+    pub fn with_reserved_floor_bps(mut self, bps: u64) -> Self {
+        self.reserved_floor_bps = bps;
+        self
+    }
+
+    /// Set the reserved fraction.
+    pub fn with_reserved_fraction(mut self, frac: f64) -> Self {
+        self.reserved_fraction = frac;
+        self
+    }
+
+    /// Set the burst allowance ratio.
+    pub fn with_burst_allowance_ratio(mut self, ratio: f64) -> Self {
+        self.burst_allowance_ratio = ratio;
+        self
+    }
+
     /// A configuration for a carrier with the given object cap.
     pub fn for_carrier(carrier: Carrier, pace_bps: u64, max_object_bytes: u32) -> Self {
         Self {
