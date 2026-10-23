@@ -215,6 +215,12 @@ pub struct MediaSenderConfig {
 }
 
 impl MediaSenderConfig {
+    /// Enable the fast path: skip the in-flight cap on clean links.
+    pub fn with_fast_path(mut self) -> Self {
+        self.fast_path = true;
+        self
+    }
+
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
         let accounting = CellAccountingConfig {
