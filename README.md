@@ -167,6 +167,14 @@ The [specification](../mlp) and the
 [conformance suite](../mlp-conformance) are under Apache-2.0, so any
 implementation may interoperate with this one.
 
+## Builders
+
+Every configuration struct carries `with_*` builder methods for ergonomic
+construction: `MediaSenderConfig`, `MediaReceiverConfig`, `BweConfig`,
+`PacerConfig`, `CellAccountingConfig`, `PlanConfig`, `SchedulerConfig`,
+`InputQueueConfig`, `HostInputConfig`, `AssemblyConfig`, `MediaLanePolicy`,
+and `PathSelectionConfig`.
+
 ## Sibling repositories
 
 | repository | what it holds |
