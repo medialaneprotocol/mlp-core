@@ -1633,14 +1633,16 @@ impl MediaSenderMachine {
         let fragment = self.build_fragment(index)?;
         let cost = fragment.len() as u64;
         let class = self.objects[index].traffic;
-        match self.pacer.try_acquire(class, cost, now) {
-            AcquireResult::Granted => {}
-            refusal => {
-                // A refusal must never be silent: the queue keeps the object and
-                // the caller needs the wait to arm its timer.
-                let wait = refusal.wait();
-                self.last_pacer_wait = Some((cost, wait));
-                return None;
+        // Cursor objects bypass the pacer: they are tiny, frequent, and
+        // latest-wins, so throttling them only adds latency without benefit.
+        if class != TrafficClass::Cursor {
+            match self.pacer.try_acquire(class, cost, now) {
+                AcquireResult::Granted => {}
+                refusal => {
+                    let wait = refusal.wait();
+                    self.last_pacer_wait = Some((cost, wait));
+                    return None;
+                }
             }
         }
         let object = &mut self.objects[index];
