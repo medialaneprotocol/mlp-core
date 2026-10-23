@@ -832,6 +832,12 @@ impl Default for HostInputConfig {
     }
 }
 
+impl HostInputConfig {
+    pub fn with_dedup_window(mut self, v: usize) -> Self { self.dedup_window = v; self }
+    pub fn with_worker_capacity(mut self, v: usize) -> Self { self.worker_capacity = v; self }
+    pub fn with_key_release_grace_ms(mut self, v: u64) -> Self { self.key_release_grace_ms = v; self }
+}
+
 /// Sender-side input state: dedup, deadline, pressed set and releases.
 #[derive(Debug, Clone)]
 pub struct HostInputState {
