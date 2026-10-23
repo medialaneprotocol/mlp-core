@@ -119,6 +119,12 @@ assert_eq!(fragment.header.class, FragmentClass::Control);
 # Ok::<(), mlp_core::media::error::RejectReason>(())
 ```
 
+## Fast path
+
+`MediaSenderConfig::fast_path` (default `false`) skips the in-flight cap on
+clean links (loss < 1 %, RTT < 50 ms), trading reliability for latency.
+Cursor objects bypass the pacer entirely (tiny, frequent, latest-wins).
+
 ## Building and testing
 
 ```bash
