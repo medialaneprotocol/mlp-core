@@ -99,6 +99,30 @@ impl BweConfig {
         self.prior_bps = remembered_bps;
         self
     }
+
+    /// Set the pace floor (default 8 000).
+    pub fn with_pace_floor_bps(mut self, bps: u64) -> Self {
+        self.pace_floor_bps = bps;
+        self
+    }
+
+    /// Set the bandwidth ceiling (default 50 Mbps).
+    pub fn with_ceiling_bps(mut self, bps: u64) -> Self {
+        self.ceiling_bps = bps;
+        self
+    }
+
+    /// Set the requested fps (default 30.0).
+    pub fn with_requested_fps(mut self, fps: f64) -> Self {
+        self.requested_fps = fps;
+        self
+    }
+
+    /// Set viewer live (default true).
+    pub fn with_viewer_live(mut self, live: bool) -> Self {
+        self.viewer_live = live;
+        self
+    }
 }
 
 /// The estimator's output: the only numbers the encoder may spend.
