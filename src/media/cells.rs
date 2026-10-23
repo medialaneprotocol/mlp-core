@@ -369,6 +369,28 @@ impl Default for CellAccountingConfig {
     }
 }
 
+impl CellAccountingConfig {
+    pub fn with_datagram(mut self, datagram: bool) -> Self {
+        self.datagram = datagram;
+        self
+    }
+
+    pub fn with_update_interval_ms(mut self, ms: u64) -> Self {
+        self.update_interval_ms = ms;
+        self
+    }
+
+    pub fn with_rtt_ms(mut self, rtt: f64) -> Self {
+        self.rtt_ms = rtt;
+        self
+    }
+
+    pub fn with_ack_ring(mut self, ring: usize) -> Self {
+        self.ack_ring = ring;
+        self
+    }
+}
+
 /// One receiver's cell accounting.
 #[derive(Debug, Clone)]
 pub struct CellAccounting {
