@@ -372,6 +372,11 @@ impl InputQueueConfig {
     pub fn heartbeat_for_rtt(rtt_ms: f64) -> u64 {
         (2.0 * rtt_ms).round().clamp(5_000.0, 30_000.0) as u64
     }
+
+    pub fn with_max_objects(mut self, v: usize) -> Self { self.max_objects = v; self }
+    pub fn with_max_bytes(mut self, v: usize) -> Self { self.max_bytes = v; self }
+    pub fn with_deadline_ms(mut self, v: u64) -> Self { self.deadline_ms = v; self }
+    pub fn with_pressed_heartbeat_ms(mut self, v: u64) -> Self { self.pressed_heartbeat_ms = v; self }
 }
 
 /// What happened to a pushed input object.
