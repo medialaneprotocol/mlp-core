@@ -119,6 +119,12 @@ assert_eq!(fragment.header.class, FragmentClass::Control);
 # Ok::<(), mlp_core::media::error::RejectReason>(())
 ```
 
+## Cursor channel
+
+`MediaSenderMachine::enqueue_cursor` sends a cursor object (latest-wins,
+never retransmitted, bypasses the pacer). Use it for pointer moves and
+other high-frequency, low-priority updates that must not block media.
+
 ## Fast path
 
 `MediaSenderConfig::fast_path` (default `false`) skips the in-flight cap on
