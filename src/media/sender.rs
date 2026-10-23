@@ -201,6 +201,9 @@ pub struct MediaSenderConfig {
     pub duplicate_loss_ratio: f64,
     /// Emit idle updates to keep the ack timeline alive.
     pub idle_updates: bool,
+    /// Fast path: skip the in-flight cap when the link is clean (loss < 1%),
+    /// trading reliability for latency on good links.
+    pub fast_path: bool,
     /// The estimator policy.
     pub bwe: BweConfig,
     /// Plan policy.
@@ -228,6 +231,7 @@ impl MediaSenderConfig {
             duplicate_max_bytes: 2_048,
             duplicate_loss_ratio: 0.03,
             idle_updates: true,
+            fast_path: false,
             bwe: BweConfig::default(),
             plan: PlanConfig {
                 anchor_threshold: (grid.cells() / 4).max(16),
@@ -915,7 +919,11 @@ impl MediaSenderMachine {
         // Bounded write queue: at most `in_flight_cap` media objects may be
         // waiting for the carrier at once.
         self.reap_write_queue(now);
-        if self.pending_writes() >= self.config.in_flight_cap {
+        let fast = self.config.fast_path
+            && self.last_estimate.loss_ratio < 0.01
+            && self.last_estimate.rtt_ms < 50.0
+            && !update.echo_critical;
+        if !fast && self.pending_writes() >= self.config.in_flight_cap {
             // The **echo's carrier** is not the bulk (MLP spec §6.3.5): it is
             // the object that carries the input sequence the receiver answers,
             // and the echo's promise is a quarter of a round trip (annex
