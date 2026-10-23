@@ -421,6 +421,15 @@ impl Default for PathSelectionConfig {
     }
 }
 
+impl PathSelectionConfig {
+    pub fn with_promote_ratio(mut self, v: f64) -> Self { self.promote_ratio = v; self }
+    pub fn with_demote_ratio(mut self, v: f64) -> Self { self.demote_ratio = v; self }
+    pub fn with_sustain_rtts(mut self, v: f64) -> Self { self.sustain_rtts = v; self }
+    pub fn with_demotions_before_sticky(mut self, v: u32) -> Self { self.demotions_before_sticky = v; self }
+    pub fn with_oscillation_window_ms(mut self, v: u64) -> Self { self.oscillation_window_ms = v; self }
+    pub fn with_disable_ms(mut self, v: u64) -> Self { self.disable_ms = v; self }
+}
+
 /// One carrier switch, with the reason the driver reports as
 /// `mlp_path_switches_total{from,to,reason}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
