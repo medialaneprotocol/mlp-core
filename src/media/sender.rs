@@ -257,6 +257,18 @@ impl MediaSenderConfig {
         self
     }
 
+    /// Set max in-flight wait ms (default 10000).
+    pub fn with_max_in_flight_wait_ms(mut self, ms: u64) -> Self {
+        self.max_in_flight_wait_ms = ms;
+        self
+    }
+
+    /// Set queue bytes cap (default 4MB).
+    pub fn with_queue_bytes_cap(mut self, cap: usize) -> Self {
+        self.queue_bytes_cap = cap;
+        self
+    }
+
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
         let accounting = CellAccountingConfig {
