@@ -123,6 +123,13 @@ impl BweConfig {
         self.viewer_live = live;
         self
     }
+
+    pub fn with_rtt_horizon(mut self, v: Duration) -> Self { self.rtt_horizon = v; self }
+    pub fn with_probe_interval(mut self, v: Duration) -> Self { self.probe_interval = v; self }
+    pub fn with_startup_max_reports(mut self, v: u32) -> Self { self.startup_max_reports = v; self }
+    pub fn with_min_delta_bytes(mut self, v: u64) -> Self { self.min_delta_bytes = v; self }
+    pub fn with_probe_payload_max(mut self, v: u32) -> Self { self.probe_payload_max = v; self }
+    pub fn with_prior_ttl(mut self, v: Duration) -> Self { self.prior_ttl = v; self }
 }
 
 /// The estimator's output: the only numbers the encoder may spend.
