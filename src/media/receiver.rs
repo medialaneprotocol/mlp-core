@@ -72,6 +72,18 @@ impl MediaReceiverConfig {
             probe_payload_max: 8_192,
         }
     }
+
+    /// Set the probe interval (default 30 000 ms).
+    pub fn with_probe_interval_ms(mut self, ms: u64) -> Self {
+        self.probe_interval_ms = ms;
+        self
+    }
+
+    /// Set the probe payload max (default 8 192).
+    pub fn with_probe_payload_max(mut self, max: u32) -> Self {
+        self.probe_payload_max = max;
+        self
+    }
 }
 
 /// What the driver must act on.
