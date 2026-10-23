@@ -239,6 +239,24 @@ impl MediaSenderConfig {
         self
     }
 
+    /// Enable/disable idle updates (default true).
+    pub fn with_idle_updates(mut self, enabled: bool) -> Self {
+        self.idle_updates = enabled;
+        self
+    }
+
+    /// Set duplicate max bytes (default 2048).
+    pub fn with_duplicate_max_bytes(mut self, max: u32) -> Self {
+        self.duplicate_max_bytes = max;
+        self
+    }
+
+    /// Set duplicate loss ratio (default 0.03).
+    pub fn with_duplicate_loss_ratio(mut self, ratio: f64) -> Self {
+        self.duplicate_loss_ratio = ratio;
+        self
+    }
+
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
         let accounting = CellAccountingConfig {
