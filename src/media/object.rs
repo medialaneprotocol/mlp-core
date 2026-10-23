@@ -46,6 +46,13 @@ impl Default for AssemblyConfig {
     }
 }
 
+impl AssemblyConfig {
+    pub fn with_max_open_objects(mut self, v: usize) -> Self { self.max_open_objects = v; self }
+    pub fn with_max_assembly_bytes(mut self, v: usize) -> Self { self.max_assembly_bytes = v; self }
+    pub fn with_dedup_window(mut self, v: usize) -> Self { self.dedup_window = v; self }
+    pub fn with_assembly_timeout(mut self, v: Duration) -> Self { self.assembly_timeout = v; self }
+}
+
 /// A reassembled media-lane object.
 ///
 /// The two `Instant`s are the machine's injected time; they are never
