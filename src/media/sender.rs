@@ -221,6 +221,24 @@ impl MediaSenderConfig {
         self
     }
 
+    /// Set the in-flight cap (default 2).
+    pub fn with_in_flight_cap(mut self, cap: usize) -> Self {
+        self.in_flight_cap = cap.max(1);
+        self
+    }
+
+    /// Set the queue cap (default 8).
+    pub fn with_queue_cap(mut self, cap: usize) -> Self {
+        self.queue_cap = cap.max(1);
+        self
+    }
+
+    /// Set the fragment payload max (default: carrier's).
+    pub fn with_fragment_payload_max(mut self, max: usize) -> Self {
+        self.fragment_payload_max = max.max(1);
+        self
+    }
+
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
         let accounting = CellAccountingConfig {
