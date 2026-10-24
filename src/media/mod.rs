@@ -29,6 +29,7 @@ pub mod object;
 pub mod pacer;
 pub mod pdu;
 pub mod receiver;
+#[cfg(feature = "resume")]
 pub mod resume;
 pub mod scheduler;
 pub mod sender;
@@ -146,6 +147,7 @@ pub enum ControlKind {
     HelloAck,
     /// `MediaResume`.
     Resume,
+    #[cfg(feature = "resume")]
     /// `MediaResumeAck`.
     ResumeAck,
     /// `MediaLaneState`.
@@ -167,6 +169,7 @@ impl ControlKind {
             Self::Hello => "hello",
             Self::HelloAck => "hello_ack",
             Self::Resume => "resume",
+#[cfg(feature = "resume")]
             Self::ResumeAck => "resume_ack",
             Self::LaneState => "lane_state",
             Self::AnchorPlan => "anchor_plan",
@@ -250,6 +253,7 @@ pub struct MediaResume {
     pub dc_transport_id: String,
 }
 
+#[cfg(feature = "resume")]
 /// `MediaResumeAck` (MLP spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaResumeAck {
@@ -340,6 +344,7 @@ pub enum MediaControlObject {
     /// Resume a parked lane.
     Resume(MediaResume),
     /// Resume answer.
+    #[cfg(feature = "resume")]
     ResumeAck(MediaResumeAck),
     /// Lane state report.
     LaneState(MediaLaneState),
@@ -360,6 +365,7 @@ impl MediaControlObject {
             Self::Hello(_) => ControlKind::Hello,
             Self::HelloAck(_) => ControlKind::HelloAck,
             Self::Resume(_) => ControlKind::Resume,
+#[cfg(feature = "resume")]
             Self::ResumeAck(_) => ControlKind::ResumeAck,
             Self::LaneState(_) => ControlKind::LaneState,
             Self::AnchorPlan(_) => ControlKind::AnchorPlan,
@@ -374,15 +380,19 @@ impl MediaControlObject {
     /// Handshake, resume, close and error objects are `URGENT` by policy;
     /// lane state and path changes are informational and normal priority.
     pub fn is_urgent(&self) -> bool {
-        matches!(
+        let base = matches!(
             self,
             Self::Hello(_)
                 | Self::HelloAck(_)
                 | Self::Resume(_)
-                | Self::ResumeAck(_)
                 | Self::Close(_)
                 | Self::Error(_)
-        )
+        );
+        #[cfg(feature = "resume")]
+        let extra = matches!(self, Self::ResumeAck(_));
+        #[cfg(not(feature = "resume"))]
+        let extra = false;
+        base || extra
     }
 
     /// Validate the body invariants of MLP spec §7.2/§6.7.
