@@ -78,6 +78,9 @@ pub mod tlv {
     pub const CELL_COUNT: u8 = 0x0E;
     /// `u16` — measured processing cost reported by a hop.
     pub const COST_MS: u8 = 0x0F;
+    /// Greasing TLV kind: implementations send this occasionally so receivers
+    /// exercise their skip paths (QUIC-style greasing, MLP spec §6.3).
+    pub const GREASE: u8 = 0x7F;
 
     /// First reserved type: receivers skip these silently (MLP spec §6.3).
     pub const RESERVED_FIRST: u8 = 0x10;
