@@ -268,3 +268,94 @@ See conformance/vectors.json for golden vectors.
 - [ ] Monitoring: Prometheus metrics endpoint
 - [ ] Logging: structured (qlog format)
 - [ ] Health check endpoint
+
+## Appendix H. Full TLV Registry
+
+| Value | Name | Length | Description |
+|---|---|---|---|
+| 0x01 | UPDATE_ID | 8 | Update identifier |
+| 0x02 | UPDATE_BASE | 8 | Base update for chaining |
+| 0x03 | PART | 4 | (index, count) pair |
+| 0x04 | UPDATE_BYTES | 4 | Total payload bytes |
+| 0x05 | CHAIN_EPOCH | 4 | Chain epoch |
+| 0x06 | REFLECTS_INPUT_SEQ | 8 | Highest input seq reflected |
+| 0x07 | SEND_EPOCH_MS | 8 | Sender session time |
+| 0x08 | DEADLINE_EPOCH_MS | 8 | Absolute deadline |
+| 0x09 | ECHO_OF_OBJECT_ID | 4 | Object being echoed |
+| 0x0A | BUDGET_BYTES | 4 | Per-update budget |
+| 0x0B | PACE_BPS | 4 | Sender's pace |
+| 0x0C | PATH_HINT | 1 | Carrier hint |
+| 0x0D | INPUT_SEQ | 8 | Input sequence |
+| 0x0E | CELL_COUNT | 4 | Grid cell count |
+| 0x0F | COST_MS | 2 | Processing cost |
+| 0x10 | STREAM_ID | 4 | Media stream id |
+| 0x11 | FEC_GROUP_ID | 4 | FEC group id |
+| 0x12 | FEC_K | 2 | Data fragments in FEC group |
+| 0x13 | PATH_ID | 1 | Path identifier |
+| 0x7F | GREASE | variable | Greasing TLV |
+| 0x10-0xEF | Reserved | variable | Standard assignments |
+| 0xF0-0xFF | Experimental | variable | Experimental use |
+
+## Appendix I. State Machine Transitions
+
+### Session States
+
+| From | Event | To |
+|---|---|---|
+| IDLE | Handshake complete | ACTIVE |
+| ACTIVE | Park request | PARKED |
+| PARKED | Resume request | RESUMING |
+| RESUMING | Resume ack (accepted) | ACTIVE |
+| RESUMING | Resume ack (rejected) | PARKED |
+| ACTIVE | Close request | CLOSING |
+| CLOSING | Close ack | CLOSED |
+| * | Fatal error | CLOSED |
+
+### Sender States
+
+| From | Event | To |
+|---|---|---|
+| READY | Enqueue update | ENQUEUING |
+| ENQUEUING | Object admitted | PACING |
+| PACING | Pacer granted | SENDING |
+| SENDING | Fragment emitted | SENDING (more) or AWAITING_ACK |
+| AWAITING_ACK | Ack received | READY |
+| AWAITING_ACK | Timeout | REPAIRING |
+| REPAIRING | Repair complete | READY |
+
+## Appendix J. Error Recovery
+
+### J.1 Loss Recovery
+
+1. Sender detects loss via gap in acks (threshold: 3 packets).
+2. Sender creates repair plan (anchor + delta).
+3. Sender enqueues repair update.
+4. Receiver applies repair, advances convergence.
+
+### J.2 Congestion Response
+
+1. Loss detected → mode = Degraded, pace *= 0.7.
+2. Queue delay > RTT → mode = Degraded.
+3. No feedback for 3×report_interval + 2s → mode = NoFeedback.
+4. Recovery: probe at increasing rate until stable.
+
+### J.3 Session Recovery
+
+1. Path change detected → start probe.
+2. Challenge-response validation.
+3. On success: migrate, resume session.
+4. On failure: retry (max 3), then park.
+
+## Appendix K. Performance Benchmarks
+
+See tessellio-bench for full results. Summary:
+
+| Metric | Value |
+|---|---|
+| Encode (delta, 640x360) | ~27 ms |
+| Encode (reset, 640x360) | ~84 ms |
+| Echo p95 (T2, bad link) | ~125 ms |
+| Convergence (T2, bad link) | ~440 ms |
+| MLP overhead | 86 bytes/update |
+| MLP p95 under loss | bounded (110-249 ms) |
+| WS p95 under loss | spikes (102-556 ms) |
