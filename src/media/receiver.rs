@@ -919,6 +919,8 @@ mod tests {
             update_bytes: 100,
             chain_epoch: 0,
             reflects_input_seq: 0,
+            stream_id: 0,
+            path_id: 0,
             send_epoch_ms: 0,
         };
         let mut ext = meta.to_ext();
