@@ -25,6 +25,7 @@ pub mod error;
 #[cfg(feature = "fec")]
 pub mod fec;
 pub mod flow;
+pub mod loss;
 pub mod qos;
 pub mod input;
 pub mod lifecycle;
@@ -45,6 +46,7 @@ pub use error::{MediaErrorCode, RejectReason};
 #[cfg(feature = "fec")]
 pub use fec::{build_parity_fragment, recover_one, xor_parity};
 pub use flow::{ConnectionFlowControl, FlowControl, StreamFlowControl};
+pub use loss::LossDetector;
 pub use qos::{QosPolicy, QosTier, allocate_bandwidth};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
 #[cfg(feature = "pacing")]
