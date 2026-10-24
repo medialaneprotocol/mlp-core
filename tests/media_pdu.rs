@@ -287,6 +287,8 @@ fn every_validation_reason_is_reachable() {
         update_bytes: 10,
         chain_epoch: 0,
         reflects_input_seq: 0,
+        stream_id: 0,
+        path_id: 0,
         send_epoch_ms: 0,
     };
     let mut other = meta;
@@ -524,6 +526,8 @@ fn update_meta_round_trips_and_checks_consistency() {
         update_bytes: 40_000,
         chain_epoch: 5,
         reflects_input_seq: 42,
+        stream_id: 0,
+        path_id: 0,
         send_epoch_ms: 1_000,
     };
     let ext = meta.to_ext();
