@@ -1,0 +1,13 @@
+[Unit]
+Description=Media Lane Protocol Core
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mlp-core
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
