@@ -865,6 +865,7 @@ fn class_slot(class: FragmentClass) -> usize {
         FragmentClass::Media => 2,
         FragmentClass::Feedback => 3,
         FragmentClass::Path => 4,
+        FragmentClass::Datagram => 5,
     }
 }
 

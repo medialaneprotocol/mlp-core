@@ -323,6 +323,8 @@ pub struct UpdateRequest {
     pub kind: UpdateKind,
     /// Highest input sequence reflected by this update.
     pub reflects_input_seq: u64,
+    /// The media stream this update belongs to (0 = default stream).
+    pub stream_id: u32,
     /// Total codec update bytes (all parts).
     pub update_bytes: u32,
     /// Whether the update is echo-critical (typing).
@@ -340,6 +342,7 @@ impl UpdateRequest {
             anchor: false,
             kind: UpdateKind::Delta,
             reflects_input_seq: 0,
+            stream_id: 0,
             update_bytes: 0,
             echo_critical: false,
             deadline_epoch_ms: None,
@@ -354,6 +357,7 @@ impl UpdateRequest {
             anchor: false,
             kind: UpdateKind::Idle,
             reflects_input_seq: 0,
+            stream_id: 0,
             update_bytes: 0,
             echo_critical: false,
             deadline_epoch_ms: None,
@@ -1052,6 +1056,7 @@ impl MediaSenderMachine {
                 update_bytes: update.update_bytes,
                 chain_epoch: self.accounting.epoch(),
                 reflects_input_seq: update.reflects_input_seq,
+                stream_id: update.stream_id,
                 send_epoch_ms: session_ms,
             };
             let mut ext = meta.to_ext();

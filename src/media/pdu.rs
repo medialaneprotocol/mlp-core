@@ -82,6 +82,9 @@ pub mod tlv {
     /// exercise their skip paths (QUIC-style greasing, MLP spec §6.3).
     pub const GREASE: u8 = 0x7F;
 
+    /// `u32` — the media stream this update belongs to (0 = default stream).
+    pub const STREAM_ID: u8 = 0x10;
+
     /// First reserved type: receivers skip these silently (MLP spec §6.3).
     pub const RESERVED_FIRST: u8 = 0x10;
     /// Last reserved type.
@@ -168,6 +171,7 @@ pub enum FragmentClass {
     Feedback = 3,
     /// Path/probe control (C5).
     Path = 4,
+    Datagram = 5,
 }
 
 impl FragmentClass {
@@ -192,7 +196,7 @@ impl FragmentClass {
     pub const fn traffic_class(self) -> TrafficClass {
         match self {
             Self::Control | Self::Path => TrafficClass::Control,
-            Self::Cursor => TrafficClass::Cursor,
+            Self::Cursor | Self::Datagram => TrafficClass::Cursor,
             Self::Media => TrafficClass::Media,
             Self::Feedback => TrafficClass::Feedback,
         }
@@ -206,6 +210,7 @@ impl FragmentClass {
             Self::Media => "media",
             Self::Feedback => "feedback",
             Self::Path => "path",
+            Self::Datagram => "datagram",
         }
     }
 }
@@ -651,6 +656,10 @@ impl HeaderExt {
     pub fn reflects_input_seq(&self) -> Option<u64> {
         self.get_u64(tlv::REFLECTS_INPUT_SEQ)
     }
+    /// The `STREAM_ID` value.
+    pub fn stream_id(&self) -> Option<u32> {
+        self.get_u32(tlv::STREAM_ID)
+    }
 
     /// The `SEND_EPOCH_MS` value.
     pub fn send_epoch_ms(&self) -> Option<u64> {
@@ -764,6 +773,8 @@ pub struct UpdateMeta {
     pub chain_epoch: u32,
     /// Highest input sequence reflected by this update's content.
     pub reflects_input_seq: u64,
+    /// The media stream this update belongs to (0 = default stream).
+    pub stream_id: u32,
     /// Sender's session-relative ms at first emission.
     pub send_epoch_ms: u64,
 }
@@ -779,6 +790,7 @@ impl UpdateMeta {
         let _ = ext.push_u32(tlv::UPDATE_BYTES, self.update_bytes);
         let _ = ext.push_u32(tlv::CHAIN_EPOCH, self.chain_epoch);
         let _ = ext.push_u64(tlv::REFLECTS_INPUT_SEQ, self.reflects_input_seq);
+        let _ = ext.push_u32(tlv::STREAM_ID, self.stream_id);
         let _ = ext.push_u64(tlv::SEND_EPOCH_MS, self.send_epoch_ms);
         ext
     }
@@ -794,6 +806,7 @@ impl UpdateMeta {
             update_bytes: ext.update_bytes().unwrap_or(0),
             chain_epoch: ext.chain_epoch().unwrap_or(0),
             reflects_input_seq: ext.reflects_input_seq().unwrap_or(0),
+            stream_id: ext.get_u32(tlv::STREAM_ID).unwrap_or(0),
             send_epoch_ms: ext.send_epoch_ms().unwrap_or(0),
         })
     }
@@ -1365,6 +1378,7 @@ mod tests {
             update_bytes: 1234,
             chain_epoch: 3,
             reflects_input_seq: 99,
+            stream_id: 0,
             send_epoch_ms: 1_000,
         };
         let ext = meta.to_ext();
@@ -1409,6 +1423,7 @@ mod tests {
             TrafficClass::Feedback
         );
         assert_eq!(FragmentClass::Path.traffic_class(), TrafficClass::Control);
+        assert_eq!(FragmentClass::Datagram.traffic_class(), TrafficClass::Cursor);
         assert_eq!(TrafficClass::Media.default_priority(), 6);
         assert_eq!(TrafficClass::Refresh.default_priority(), 7);
         assert_eq!(TrafficClass::Control.default_priority(), 0);
