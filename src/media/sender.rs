@@ -22,7 +22,7 @@ use super::lifecycle::{
     LaneEvidence, LaneLifecycle, MediaCloseCode, MediaLanePolicy, MediaLaneStateKind,
     STALE_ACK_WINDOWS,
 };
-use super::pacer::{AcquireResult, MediaPacer, PacerConfig};
+use super::pacer::{AcquireResult, DenyReason, MediaPacer, PacerConfig};
 use super::pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, TrafficClass, UpdateMeta,
     tlv,
@@ -1708,9 +1708,36 @@ impl MediaSenderMachine {
         let fragment = self.build_fragment(index)?;
         let cost = fragment.len() as u64;
         let class = self.objects[index].traffic;
+        let echo_critical = self.objects[index].echo_critical;
         // Cursor objects bypass the pacer: they are tiny, frequent, and
         // latest-wins, so throttling them only adds latency without benefit.
-        if class != TrafficClass::Cursor {
+        if class == TrafficClass::Cursor {
+            // no accounting: cursor is negligible and never retransmitted.
+        } else if echo_critical {
+            // Echo-critical pulses (the input's carrier) bypass the rate
+            // limiter: the echo's promise is a quarter of a round trip, and
+            // the pacer would only delay the very object the receiver answers.
+            // The window budget is still respected and accounted for, so
+            // INV-7 holds.
+            match self.pacer.try_acquire(class, cost, now) {
+                AcquireResult::Granted => {}
+                AcquireResult::Wait { wait, reason } => match reason {
+                    DenyReason::Reserved | DenyReason::Tokens => {
+                        // Rate-limited only: bypass the token bucket, but keep
+                        // the 1-second window honest.
+                        self.pacer.record_window(cost, now);
+                    }
+                    DenyReason::Window => {
+                        self.last_pacer_wait = Some((cost, wait));
+                        return None;
+                    }
+                },
+                AcquireResult::Oversize { .. } => {
+                    self.last_pacer_wait = Some((cost, Duration::ZERO));
+                    return None;
+                }
+            }
+        } else {
             match self.pacer.try_acquire(class, cost, now) {
                 AcquireResult::Granted => {}
                 refusal => {

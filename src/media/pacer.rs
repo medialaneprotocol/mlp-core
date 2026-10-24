@@ -374,6 +374,14 @@ impl MediaPacer {
         matches!(self.check(class, bytes), AcquireResult::Granted)
     }
 
+    /// Record `bytes` in the 1-second window without consuming tokens and
+    /// without blocking: used by traffic that is allowed to bypass the rate
+    /// limiter (echo-critical pulses) but must still be accounted for INV-7.
+    pub fn record_window(&mut self, bytes: u64, now: Instant) {
+        self.purge_window(now);
+        self.window.push_back((now, bytes));
+    }
+
     /// Try to acquire `bytes` for `class`; on success the tokens and the window
     /// budget are consumed.
     pub fn try_acquire(&mut self, class: TrafficClass, bytes: u64, now: Instant) -> AcquireResult {
