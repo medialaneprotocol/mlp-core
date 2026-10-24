@@ -205,3 +205,21 @@ lifecycle, pacer, path_selection, bwe, assembly, full.
 | [`mlp-proto`](https://github.com/medialaneprotocol/mlp-proto) | the wire schema |
 | [`mlp-harness`](https://github.com/medialaneprotocol/mlp-harness) | the verification layer: the link model, the driver, the invariants |
 | [`mlp-conformance`](https://github.com/medialaneprotocol/mlp-conformance) | the conformance corpus and its gate |
+
+## Feature flags
+
+| Feature | Default | Description |
+|---|---|---|
+| `cli` | yes | Command-line tool |
+| `pacing` | yes | Token-bucket pacer (optional) |
+| `bwe` | yes | Bandwidth estimator (core) |
+| `path-selection` | yes | Path selector (optional) |
+| `resume` | yes | Session resume (optional) |
+| `input` | yes | Input path (core) |
+| `fec` | yes | Forward error correction |
+
+Build without optional extensions: `cargo build --no-default-features --features "cli bwe input"`.
+
+## Documentation
+
+See `docs/` for: overview, wire-format, version-negotiation, invariants, error-codes, telemetry, interop, implementations, architecture, FAQ, glossary, quickstart, deployment, local-deploy, roadmap, contributing, rfc-draft, rfc-outline, security, iana, model (TLA+).
