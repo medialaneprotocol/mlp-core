@@ -207,3 +207,64 @@ docs/model/mlp.tla
 ## Appendix C. Change Log
 
 CHANGELOG.md
+
+## Appendix D. Full Protocol State Machine
+
+### D.1 Session States
+
+```
+IDLE -> HANDSHAKING -> ACTIVE -> PARKED -> RESUMING -> ACTIVE
+ACTIVE -> CLOSING -> CLOSED
+```
+
+### D.2 Sender States
+
+```
+READY -> ENQUEUING -> PACING -> SENDING -> AWAITING_ACK -> READY
+```
+
+### D.3 Receiver States
+
+```
+WAITING -> ASSEMBLING -> APPLYING -> ACKING -> WAITING
+```
+
+## Appendix E. Wire Format Examples
+
+### E.1 Minimal Control Fragment
+
+```
+4d 4c 50 00  (magic)
+01            (version)
+00            (class = CONTROL)
+00            (flags)
+00            (priority = CONTROL)
+00 00 00 01  (object_id = 1)
+00 00         (fragment_index = 0)
+00 01         (fragment_count = 1)
+00 00 00 00  (payload_len = 0)
+00 00         (header_ext_len = 0)
+```
+
+### E.2 Media Fragment with UpdateMeta
+
+See conformance/vectors.json for golden vectors.
+
+## Appendix F. Performance Targets
+
+| Metric | Target | Measured |
+|---|---|---|
+| Encode (delta, 640x360) | < 50 ms | ~27 ms |
+| Encode (reset, 640x360) | < 200 ms | ~84 ms |
+| Echo p95 (T2, bad link) | < 550 ms | ~125 ms |
+| Convergence (T2, bad link) | < 500 ms | ~440 ms |
+
+## Appendix G. Deployment Checklist
+
+- [ ] Carrier: WebSocket (wss://) or gRPC (TLS)
+- [ ] TLS certificate configured
+- [ ] Max connections limit set
+- [ ] Rate limiting enabled
+- [ ] Monitoring: Prometheus metrics endpoint
+- [ ] Logging: structured (qlog format)
+- [ ] Health check endpoint
