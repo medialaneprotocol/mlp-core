@@ -195,6 +195,7 @@ pub fn parse_class(name: &str) -> Result<FragmentClass, CliError> {
         "feedback" => Ok(FragmentClass::Feedback),
         "path" => Ok(FragmentClass::Path),
         "datagram" => Ok(FragmentClass::Datagram),
+        "fec" => Ok(FragmentClass::Fec),
         other => Err(CliError::Usage(format!(
             "unknown class {other:?}; the classes are control, cursor, media, feedback and path"
         ))),

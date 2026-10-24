@@ -84,6 +84,10 @@ pub mod tlv {
 
     /// `u32` — the media stream this update belongs to (0 = default stream).
     pub const STREAM_ID: u8 = 0x10;
+    /// `u32` — FEC group id.
+    pub const FEC_GROUP_ID: u8 = 0x11;
+    /// `u16` — number of data fragments in the FEC group.
+    pub const FEC_K: u8 = 0x12;
 
     /// First reserved type: receivers skip these silently (MLP spec §6.3).
     pub const RESERVED_FIRST: u8 = 0x10;
@@ -172,6 +176,7 @@ pub enum FragmentClass {
     /// Path/probe control (C5).
     Path = 4,
     Datagram = 5,
+    Fec = 6,
 }
 
 impl FragmentClass {
@@ -197,6 +202,7 @@ impl FragmentClass {
         match self {
             Self::Control | Self::Path => TrafficClass::Control,
             Self::Cursor | Self::Datagram => TrafficClass::Cursor,
+            Self::Fec => TrafficClass::Media,
             Self::Media => TrafficClass::Media,
             Self::Feedback => TrafficClass::Feedback,
         }
@@ -211,6 +217,7 @@ impl FragmentClass {
             Self::Feedback => "feedback",
             Self::Path => "path",
             Self::Datagram => "datagram",
+            Self::Fec => "fec",
         }
     }
 }

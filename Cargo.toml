@@ -13,13 +13,15 @@ categories = ["network-programming", "no-std::no-alloc"]
 publish = false
 
 [features]
-default = ["cli", "pacing", "bwe", "path-selection", "resume", "input"]
+default = ["cli", "pacing", "bwe", "path-selection", "resume", "input", "fec"]
 # Core is always included. Extensions are optional.
 pacing = []
 bwe = []
 path-selection = []
 resume = []
 input = []
+# Forward error correction (XOR parity over fragment groups).
+fec = []
 cli = ["dep:serde_json"]
 
 [dependencies]
