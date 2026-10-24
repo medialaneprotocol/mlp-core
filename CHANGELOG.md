@@ -14,4 +14,5 @@
 - Real cell accounting support (via tessellio-core `changed_cell_indices`).
 
 ### Changed
+- Real cfg-gates: `pacing`, `path-selection`, and `resume` features now actually gate their code (modules, types, match arms). `--no-default-features` builds the core without them.
 - BWE probe_interval default 30s, startup_max_reports 4 (reverted from tuning).
