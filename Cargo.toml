@@ -33,6 +33,7 @@ required-features = ["cli"]
 
 [dev-dependencies]
 serde_json = "1"
+proptest = "1"
 # The core's own suites drive the harness. The harness drives the core: the
 # cycle runs through a dev-dependency, which cargo allows. The patch makes
 # the harness's dependency on the core resolve to *this* core, so there is
