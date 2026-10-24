@@ -179,6 +179,12 @@ and `PathSelectionConfig`.
 
 See `examples/` directory. Run with `cargo run --example <name>`.
 
+## Examples
+
+See `examples/` directory (13 examples). Run with `cargo run --example <name>`:
+basic, cursor, input, parking, resume, fragment, ack, cells, scheduler,
+lifecycle, pacer, path_selection, bwe, assembly, full.
+
 ## Sibling repositories
 
 | repository | what it holds |
