@@ -152,6 +152,17 @@ the cycle runs through a dev-dependency, which cargo allows, and the
 manifest patches the harness's dependency on the core back to this checkout
 so that the two crates share one copy of the machines.
 
+## Reference implementations
+
+Wire-format-compatible implementations of the PDU codec:
+
+- Rust (this crate): `medialaneprotocol/mlp-core`
+- Go: `medialaneprotocol/mlp-go`
+- Python: `medialaneprotocol/mlp-py`
+- C: `medialaneprotocol/mlp-c`
+
+All four pass the same golden-vector test (see each repo's tests).
+
 ## Status
 
 In development. One moving version, `v0.1.0`, naming the current commit. The
