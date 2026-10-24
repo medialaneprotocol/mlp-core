@@ -12,11 +12,13 @@ categories = ["network-programming", "no-std::no-alloc"]
 publish = false
 
 [features]
-default = ["cli"]
-# The command-line tool: the JSON form it prints. It is on by default because
-# the tool is part of what this crate ships — `cargo install --path .` must
-# give a person the protocol's tool — and because a gate that does not build
-# the tool does not gate it.
+default = ["cli", "pacing", "bwe", "path-selection", "resume", "input"]
+# Core is always included. Extensions are optional.
+pacing = []
+bwe = []
+path-selection = []
+resume = []
+input = []
 cli = ["dep:serde_json"]
 
 [dependencies]
