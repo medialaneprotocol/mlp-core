@@ -405,6 +405,7 @@ pub enum EnqueueOutcome {
 /// * three demotions inside 10 minutes disable DC for 10 minutes
 ///   (`path_oscillation_total`);
 /// * never switch during an anchor plan or an input pulse.
+#[cfg(feature = "path-selection")]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PathSelectionConfig {
     /// Promotion ratio over the incumbent path.
@@ -421,6 +422,7 @@ pub struct PathSelectionConfig {
     pub disable_ms: u64,
 }
 
+#[cfg(feature = "path-selection")]
 impl Default for PathSelectionConfig {
     fn default() -> Self {
         Self {
@@ -434,6 +436,7 @@ impl Default for PathSelectionConfig {
     }
 }
 
+#[cfg(feature = "path-selection")]
 impl PathSelectionConfig {
     pub fn with_promote_ratio(mut self, v: f64) -> Self { self.promote_ratio = v; self }
     pub fn with_demote_ratio(mut self, v: f64) -> Self { self.demote_ratio = v; self }
@@ -445,6 +448,7 @@ impl PathSelectionConfig {
 
 /// One carrier switch, with the reason the driver reports as
 /// `mlp_path_switches_total{from,to,reason}`.
+#[cfg(feature = "path-selection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSwitch {
     /// The path left behind.
@@ -456,6 +460,7 @@ pub struct PathSwitch {
 }
 
 /// The path-selection state machine (MLP spec §8).
+#[cfg(feature = "path-selection")]
 #[derive(Debug, Clone)]
 pub struct PathSelector {
     config: PathSelectionConfig,
@@ -468,6 +473,7 @@ pub struct PathSelector {
     switches: u64,
 }
 
+#[cfg(feature = "path-selection")]
 impl PathSelector {
     /// Start on `active` (WS for S1).
     pub fn new(active: MediaPath, config: PathSelectionConfig) -> Self {
