@@ -16,7 +16,7 @@ fn main() {
     println!("feedback: {}", hex(&frag.encode()));
 
     // Vector 4: media with anchor flag
-    let meta = UpdateMeta { update_id: 5, update_base: 0, part_index: 0, part_count: 1, update_bytes: 10, chain_epoch: 1, reflects_input_seq: 0, send_epoch_ms: 500 };
+    let meta = UpdateMeta { update_id: 5, update_base: 0, part_index: 0, part_count: 1, update_bytes: 10, chain_epoch: 1, reflects_input_seq: 0, stream_id: 0, path_id: 0, send_epoch_ms: 500 };
     let ext = meta.to_ext();
     let frag = Fragment::new(FragmentClass::Media, FragmentFlags::ANCHOR, Priority::MEDIA, 4, 0, 1, ext, vec![0; 10]).unwrap();
     println!("media-anchor: {}", hex(&frag.encode()));
