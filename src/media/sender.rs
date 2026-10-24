@@ -22,6 +22,7 @@ use super::lifecycle::{
     LaneEvidence, LaneLifecycle, MediaCloseCode, MediaLanePolicy, MediaLaneStateKind,
     STALE_ACK_WINDOWS,
 };
+#[cfg(feature = "pacing")]
 use super::pacer::{AcquireResult, DenyReason, MediaPacer, PacerConfig};
 use super::pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, TrafficClass, UpdateMeta,
@@ -746,6 +747,7 @@ impl OutboundObject {
 pub struct MediaSenderMachine {
     config: MediaSenderConfig,
     estimator: BandwidthEstimator,
+    #[cfg(feature = "pacing")]
     pacer: MediaPacer,
     scheduler: Scheduler,
     accounting: CellAccounting,
@@ -762,6 +764,7 @@ pub struct MediaSenderMachine {
     pending_plan_reasons: Vec<PlanStartReason>,
     last_estimate: Estimate,
     policy: MediaLanePolicy,
+    #[cfg(feature = "pacing")]
     last_pacer_wait: Option<(u64, Duration)>,
 }
 
@@ -769,6 +772,7 @@ impl MediaSenderMachine {
     /// Create a sender for one receiver.
     pub fn new(config: MediaSenderConfig, grid: CellGrid, now: Instant) -> Self {
         let estimator = BandwidthEstimator::new(config.bwe);
+        #[cfg(feature = "pacing")]
         let mut pacer = MediaPacer::with_config(
             PacerConfig {
                 max_grant_bytes: config.fragment_payload_max as u64,
@@ -776,6 +780,7 @@ impl MediaSenderMachine {
             },
             now,
         );
+        #[cfg(feature = "pacing")]
         pacer.set_rtt(Duration::from_millis(50));
         let accounting = CellAccounting::new(grid, config.accounting);
         let scheduler = Scheduler::new(config.scheduler, config.plan);
@@ -783,6 +788,7 @@ impl MediaSenderMachine {
         Self {
             config,
             estimator,
+            #[cfg(feature = "pacing")]
             pacer,
             scheduler,
             accounting,
@@ -798,6 +804,7 @@ impl MediaSenderMachine {
             pending_plan_reasons: Vec::new(),
             last_estimate: estimate,
             policy: MediaLanePolicy::default(),
+            #[cfg(feature = "pacing")]
             last_pacer_wait: None,
         }
     }
@@ -1711,41 +1718,41 @@ impl MediaSenderMachine {
         let echo_critical = self.objects[index].echo_critical;
         // Cursor objects bypass the pacer: they are tiny, frequent, and
         // latest-wins, so throttling them only adds latency without benefit.
-        if class == TrafficClass::Cursor {
-            // no accounting: cursor is negligible and never retransmitted.
-        } else if echo_critical {
-            // Echo-critical pulses (the input's carrier) bypass the rate
-            // limiter: the echo's promise is a quarter of a round trip, and
-            // the pacer would only delay the very object the receiver answers.
-            // The window budget is still respected and accounted for, so
-            // INV-7 holds.
-            match self.pacer.try_acquire(class, cost, now) {
-                AcquireResult::Granted => {}
-                AcquireResult::Wait { wait, reason } => match reason {
-                    DenyReason::Reserved | DenyReason::Tokens => {
-                        // Rate-limited only: bypass the token bucket, but keep
-                        // the 1-second window honest.
-                        self.pacer.record_window(cost, now);
+        #[cfg(feature = "pacing")]
+        {
+            if class == TrafficClass::Cursor {
+                // cursor bypasses the pacer entirely
+            } else if echo_critical {
+                match self.pacer.try_acquire(class, cost, now) {
+                    AcquireResult::Granted => {}
+                    AcquireResult::Wait { wait, reason } => match reason {
+                        DenyReason::Reserved | DenyReason::Tokens => {
+                            self.pacer.record_window(cost, now);
+                        }
+                        DenyReason::Window => {
+                            self.last_pacer_wait = Some((cost, wait));
+                            return None;
+                        }
+                    },
+                    AcquireResult::Oversize { .. } => {
+                        self.last_pacer_wait = Some((cost, Duration::ZERO));
+                        return None;
                     }
-                    DenyReason::Window => {
+                }
+            } else {
+                match self.pacer.try_acquire(class, cost, now) {
+                    AcquireResult::Granted => {}
+                    refusal => {
+                        let wait = refusal.wait();
                         self.last_pacer_wait = Some((cost, wait));
                         return None;
                     }
-                },
-                AcquireResult::Oversize { .. } => {
-                    self.last_pacer_wait = Some((cost, Duration::ZERO));
-                    return None;
                 }
             }
-        } else {
-            match self.pacer.try_acquire(class, cost, now) {
-                AcquireResult::Granted => {}
-                refusal => {
-                    let wait = refusal.wait();
-                    self.last_pacer_wait = Some((cost, wait));
-                    return None;
-                }
-            }
+        }
+        #[cfg(not(feature = "pacing"))]
+        {
+            let _ = (class, echo_critical, cost, now);
         }
         let object = &mut self.objects[index];
         object.next_fragment += 1;
@@ -1807,7 +1814,10 @@ impl MediaSenderMachine {
                 None => 0,
             };
             let class = self.objects[index].traffic;
+            #[cfg(feature = "pacing")]
             consider(self.pacer.time_until(class, cost, now));
+            #[cfg(not(feature = "pacing"))]
+            let _ = (class, cost, now);
         }
         if let Some(deadline) = self.estimator.poll_timeout(now) {
             consider(deadline);
@@ -1862,6 +1872,7 @@ impl MediaSenderMachine {
     }
 
     /// The last pacer refusal: `(bytes asked, wait)`.
+    #[cfg(feature = "pacing")]
     pub fn last_pacer_wait(&self) -> Option<(u64, Duration)> {
         self.last_pacer_wait
     }
@@ -1883,13 +1894,23 @@ impl MediaSenderMachine {
     }
 
     /// The pacer's 1-second window budget: the sender's INV-7 contract.
+    #[cfg(feature = "pacing")]
     pub fn pacer_window_budget_bytes(&self) -> u64 {
         self.pacer.window_budget_bytes()
     }
+    #[cfg(not(feature = "pacing"))]
+    pub fn pacer_window_budget_bytes(&self) -> u64 {
+        u64::MAX
+    }
 
     /// The largest grant the pacer will make in one release.
+    #[cfg(feature = "pacing")]
     pub fn pacer_max_grant_bytes(&self) -> u64 {
         self.pacer.max_grant_bytes()
+    }
+    #[cfg(not(feature = "pacing"))]
+    pub fn pacer_max_grant_bytes(&self) -> u64 {
+        u64::MAX
     }
 
     /// Whether the lane is allowed to enqueue media right now.
@@ -2017,8 +2038,16 @@ impl MediaSenderMachine {
             let fits = self
                 .build_fragment(index)
                 .map(|fragment| {
-                    self.pacer
-                        .can_acquire(object.traffic, fragment.len() as u64)
+                    #[cfg(feature = "pacing")]
+                    {
+                        self.pacer
+                            .can_acquire(object.traffic, fragment.len() as u64)
+                    }
+                    #[cfg(not(feature = "pacing"))]
+                    {
+                        let _ = (object.traffic, fragment.len());
+                        true
+                    }
                 })
                 .unwrap_or(false);
             let is_better = |candidate: Option<(usize, u8, bool, Instant)>| match candidate {
@@ -2254,11 +2283,14 @@ impl MediaSenderMachine {
         // repair plan covers them (MLP spec §6.2.8).
         self.drop_oversized_objects(estimate.max_object_bytes as usize);
         self.last_estimate = estimate;
-        self.pacer
-            .set_pace(estimate.pace_bps, estimate.max_object_bytes, now);
-        self.pacer.set_rtt(Duration::from_secs_f64(
-            (self.estimator.rtt_ms().max(1.0)) / 1_000.0,
-        ));
+        #[cfg(feature = "pacing")]
+        {
+            self.pacer
+                .set_pace(estimate.pace_bps, estimate.max_object_bytes, now);
+            self.pacer.set_rtt(Duration::from_secs_f64(
+                (self.estimator.rtt_ms().max(1.0)) / 1_000.0,
+            ));
+        }
         let session_ms = self.session_ms(now);
         self.accounting.set_rtt_ms(self.estimator.rtt_ms());
         self.accounting

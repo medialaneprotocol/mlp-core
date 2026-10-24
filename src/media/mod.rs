@@ -25,6 +25,7 @@ pub mod error;
 pub mod input;
 pub mod lifecycle;
 pub mod object;
+#[cfg(feature = "pacing")]
 pub mod pacer;
 pub mod pdu;
 pub mod receiver;
@@ -35,6 +36,7 @@ pub mod sender;
 pub use bwe::{BandwidthEstimator, BweConfig, BweMode, Estimate, PriorStore, ProbeRequest};
 pub use error::{MediaErrorCode, RejectReason};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
+#[cfg(feature = "pacing")]
 pub use pacer::{AcquireResult, MediaPacer, PacerConfig, TokenBucket};
 pub use pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, FragmentHeader, HeaderExt, Priority,
