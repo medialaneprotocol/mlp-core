@@ -6,6 +6,7 @@ rust-version = "1.85"
 description = "Reference implementation of the Media Lane Protocol (MLP) core: sans-IO fragment framing, object assembly, congestion control, scheduling, and session continuity."
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/medialaneprotocol/mlp-core"
+documentation = "https://docs.rs/mlp-core"
 readme = "README.md"
 keywords = ["media", "protocol", "transport", "realtime", "sans-io"]
 categories = ["network-programming", "no-std::no-alloc"]
