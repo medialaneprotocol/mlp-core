@@ -175,6 +175,10 @@ construction: `MediaSenderConfig`, `MediaReceiverConfig`, `BweConfig`,
 `InputQueueConfig`, `HostInputConfig`, `AssemblyConfig`, `MediaLanePolicy`,
 and `PathSelectionConfig`.
 
+## Examples
+
+See `examples/` directory. Run with `cargo run --example <name>`.
+
 ## Sibling repositories
 
 | repository | what it holds |
