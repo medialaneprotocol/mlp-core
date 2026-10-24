@@ -33,6 +33,8 @@ pub mod pdu;
 pub mod receiver;
 #[cfg(feature = "resume")]
 pub mod resume;
+pub mod ticket;
+pub mod migration;
 pub mod scheduler;
 pub mod sender;
 

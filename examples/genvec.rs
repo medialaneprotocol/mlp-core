@@ -9,6 +9,7 @@ fn main() {
         chain_epoch: 3,
         reflects_input_seq: 99,
         stream_id: 0,
+        path_id: 0,
         send_epoch_ms: 1000,
     };
     let ext = meta.to_ext();
