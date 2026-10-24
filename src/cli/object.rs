@@ -149,6 +149,7 @@ fn object_value(object: &MediaObject) -> Value {
             "chain_epoch": meta.chain_epoch,
             "reflects_input_seq": meta.reflects_input_seq,
             "stream_id": meta.stream_id,
+            "path_id": meta.path_id,
             "send_epoch_ms": meta.send_epoch_ms,
         })),
         "tlvs": tlv_values(&object.ext),
@@ -236,6 +237,7 @@ fn render(
                     meta.reflects_input_seq.to_string(),
                 ],
                 vec!["stream id".to_string(), meta.stream_id.to_string()],
+                vec!["path id".to_string(), meta.path_id.to_string()],
                 vec!["send epoch ms".to_string(), meta.send_epoch_ms.to_string()],
             ];
             text.push_str(&table(&["update", "value"], &rows));

@@ -88,6 +88,8 @@ pub mod tlv {
     pub const FEC_GROUP_ID: u8 = 0x11;
     /// `u16` — number of data fragments in the FEC group.
     pub const FEC_K: u8 = 0x12;
+    /// `u8` — the path this fragment was sent over (0 = default path).
+    pub const PATH_ID: u8 = 0x13;
 
     /// First reserved type: receivers skip these silently (MLP spec §6.3).
     pub const RESERVED_FIRST: u8 = 0x10;
@@ -627,6 +629,13 @@ impl HeaderExt {
         bytes.copy_from_slice(value);
         Some(u16::from_le_bytes(bytes))
     }
+    fn get_u8(&self, kind: u8) -> Option<u8> {
+        let value = self.get(kind)?;
+        if value.len() != 1 {
+            return None;
+        }
+        Some(value[0])
+    }
 
     /// The `UPDATE_ID` value, when present and well-formed.
     pub fn update_id(&self) -> Option<u64> {
@@ -666,6 +675,10 @@ impl HeaderExt {
     /// The `STREAM_ID` value.
     pub fn stream_id(&self) -> Option<u32> {
         self.get_u32(tlv::STREAM_ID)
+    }
+    /// The `PATH_ID` value.
+    pub fn path_id(&self) -> Option<u8> {
+        self.get_u8(tlv::PATH_ID)
     }
 
     /// The `SEND_EPOCH_MS` value.
@@ -782,6 +795,8 @@ pub struct UpdateMeta {
     pub reflects_input_seq: u64,
     /// The media stream this update belongs to (0 = default stream).
     pub stream_id: u32,
+    /// The path this fragment was sent over (0 = default path).
+    pub path_id: u8,
     /// Sender's session-relative ms at first emission.
     pub send_epoch_ms: u64,
 }
@@ -798,6 +813,7 @@ impl UpdateMeta {
         let _ = ext.push_u32(tlv::CHAIN_EPOCH, self.chain_epoch);
         let _ = ext.push_u64(tlv::REFLECTS_INPUT_SEQ, self.reflects_input_seq);
         let _ = ext.push_u32(tlv::STREAM_ID, self.stream_id);
+        let _ = ext.push_u8(tlv::PATH_ID, self.path_id);
         let _ = ext.push_u64(tlv::SEND_EPOCH_MS, self.send_epoch_ms);
         ext
     }
@@ -814,6 +830,7 @@ impl UpdateMeta {
             chain_epoch: ext.chain_epoch().unwrap_or(0),
             reflects_input_seq: ext.reflects_input_seq().unwrap_or(0),
             stream_id: ext.get_u32(tlv::STREAM_ID).unwrap_or(0),
+            path_id: ext.get_u8(tlv::PATH_ID).unwrap_or(0),
             send_epoch_ms: ext.send_epoch_ms().unwrap_or(0),
         })
     }
@@ -1386,6 +1403,7 @@ mod tests {
             chain_epoch: 3,
             reflects_input_seq: 99,
             stream_id: 0,
+            path_id: 0,
             send_epoch_ms: 1_000,
         };
         let ext = meta.to_ext();
