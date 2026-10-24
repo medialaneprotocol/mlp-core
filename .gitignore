@@ -1,12 +1,2 @@
-# Build artifacts
 /target/
-
-# Editors and OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
-
-# Local scratch
-*.log
-/tmp/
+Cargo.lock
