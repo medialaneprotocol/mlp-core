@@ -38,6 +38,7 @@ pub mod receiver;
 pub mod resume;
 pub mod ticket;
 pub mod migration;
+pub mod metrics;
 pub mod scheduler;
 pub mod sender;
 
