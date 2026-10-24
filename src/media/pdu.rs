@@ -1448,7 +1448,10 @@ mod tests {
             TrafficClass::Feedback
         );
         assert_eq!(FragmentClass::Path.traffic_class(), TrafficClass::Control);
-        assert_eq!(FragmentClass::Datagram.traffic_class(), TrafficClass::Cursor);
+        assert_eq!(
+            FragmentClass::Datagram.traffic_class(),
+            TrafficClass::Cursor
+        );
         assert_eq!(TrafficClass::Media.default_priority(), 6);
         assert_eq!(TrafficClass::Refresh.default_priority(), 7);
         assert_eq!(TrafficClass::Control.default_priority(), 0);

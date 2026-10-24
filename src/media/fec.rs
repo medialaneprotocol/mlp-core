@@ -22,7 +22,11 @@ pub fn xor_parity(data: &[Vec<u8>]) -> Vec<u8> {
 
 /// Recover a missing fragment given the parity and the other data fragments.
 /// Returns the recovered payload, or `None` if more than one is missing.
-pub fn recover_one(missing_index: usize, data: &[Option<Vec<u8>>], parity: &[u8]) -> Option<Vec<u8>> {
+pub fn recover_one(
+    missing_index: usize,
+    data: &[Option<Vec<u8>>],
+    parity: &[u8],
+) -> Option<Vec<u8>> {
     let missing_count = data.iter().filter(|d| d.is_none()).count();
     if missing_count != 1 {
         return None;

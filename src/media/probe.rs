@@ -70,14 +70,17 @@ impl PathProber {
 
     /// Results for a specific path.
     pub fn path_results(&self, path_id: u8) -> Vec<ProbeResult> {
-        self.results.iter().filter(|r| r.path_id == path_id).copied().collect()
+        self.results
+            .iter()
+            .filter(|r| r.path_id == path_id)
+            .copied()
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn best_path_by_rtt() {

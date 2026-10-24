@@ -565,15 +565,42 @@ impl Default for MediaLanePolicy {
 }
 
 impl MediaLanePolicy {
-    pub fn with_media_lane_enabled(mut self, v: bool) -> Self { self.media_lane_enabled = v; self }
-    pub fn with_relay_stream_enabled(mut self, v: bool) -> Self { self.relay_stream_enabled = v; self }
-    pub fn with_patch_mode(mut self, v: bool) -> Self { self.patch_mode = v; self }
-    pub fn with_park_hold(mut self, v: bool) -> Self { self.park_hold = v; self }
-    pub fn with_input_deadline_ms(mut self, v: u64) -> Self { self.input_deadline_ms = v; self }
-    pub fn with_resume_ttl_seconds(mut self, v: u64) -> Self { self.resume_ttl_seconds = v; self }
-    pub fn with_floor_bps(mut self, v: u64) -> Self { self.floor_bps = v; self }
-    pub fn with_ceiling_bps(mut self, v: u64) -> Self { self.ceiling_bps = v; self }
-    pub fn with_path_selection(mut self, v: bool) -> Self { self.path_selection = v; self }
+    pub fn with_media_lane_enabled(mut self, v: bool) -> Self {
+        self.media_lane_enabled = v;
+        self
+    }
+    pub fn with_relay_stream_enabled(mut self, v: bool) -> Self {
+        self.relay_stream_enabled = v;
+        self
+    }
+    pub fn with_patch_mode(mut self, v: bool) -> Self {
+        self.patch_mode = v;
+        self
+    }
+    pub fn with_park_hold(mut self, v: bool) -> Self {
+        self.park_hold = v;
+        self
+    }
+    pub fn with_input_deadline_ms(mut self, v: u64) -> Self {
+        self.input_deadline_ms = v;
+        self
+    }
+    pub fn with_resume_ttl_seconds(mut self, v: u64) -> Self {
+        self.resume_ttl_seconds = v;
+        self
+    }
+    pub fn with_floor_bps(mut self, v: u64) -> Self {
+        self.floor_bps = v;
+        self
+    }
+    pub fn with_ceiling_bps(mut self, v: u64) -> Self {
+        self.ceiling_bps = v;
+        self
+    }
+    pub fn with_path_selection(mut self, v: bool) -> Self {
+        self.path_selection = v;
+        self
+    }
 
     /// Whether media may be emitted at all under this policy.
     pub fn emits_media(&self) -> bool {

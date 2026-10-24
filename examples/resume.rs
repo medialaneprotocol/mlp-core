@@ -1,7 +1,6 @@
 //! Resume example: park and resume a session.
 
 use mlp_core::media::cells::CellGrid;
-use mlp_core::media::pdu::Carrier;
 use mlp_core::media::resume::ResumeRejectReason;
 use std::time::Instant;
 

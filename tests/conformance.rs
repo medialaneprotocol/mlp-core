@@ -19,8 +19,9 @@ fn every_conformance_vector_parses() {
     assert!(!v.vectors.is_empty());
     for vec in &v.vectors {
         let bytes = hex_decode(&vec.hex);
-        let (frag, consumed) = mlp_core::media::pdu::Fragment::parse(&bytes, mlp_core::media::pdu::Carrier::Ws)
-            .unwrap_or_else(|e| panic!("{}: parse failed: {:?}", vec.name, e));
+        let (frag, consumed) =
+            mlp_core::media::pdu::Fragment::parse(&bytes, mlp_core::media::pdu::Carrier::Ws)
+                .unwrap_or_else(|e| panic!("{}: parse failed: {:?}", vec.name, e));
         assert_eq!(consumed, bytes.len(), "{}: not fully consumed", vec.name);
         let _ = frag;
     }

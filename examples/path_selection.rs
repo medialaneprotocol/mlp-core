@@ -1,8 +1,7 @@
 //! Path selection example: promote/demote carriers.
 
-use mlp_core::media::sender::{PathSelectionConfig, PathSelector};
 use mlp_core::media::MediaPath;
-use std::time::Instant;
+use mlp_core::media::sender::{PathSelectionConfig, PathSelector};
 
 fn main() {
     let mut selector = PathSelector::new(MediaPath::Ws, PathSelectionConfig::default());
@@ -11,7 +10,8 @@ fn main() {
     for step in 1..=8u64 {
         let at = step * 200;
         selector.on_goodput(MediaPath::Ws, 1_000_000, at, false, false);
-        if let Some(switch) = selector.on_goodput(MediaPath::DcDirect, 1_500_000, at, false, false) {
+        if let Some(switch) = selector.on_goodput(MediaPath::DcDirect, 1_500_000, at, false, false)
+        {
             println!("promoted: {:?} -> {:?}", switch.from, switch.to);
             break;
         }

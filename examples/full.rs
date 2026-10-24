@@ -16,7 +16,8 @@ fn main() {
         grid,
         now,
     );
-    let mut receiver = MediaReceiverMachine::new(MediaReceiverConfig::for_carrier(Carrier::Ws), now);
+    let mut receiver =
+        MediaReceiverMachine::new(MediaReceiverConfig::for_carrier(Carrier::Ws), now);
 
     let _ = sender.enqueue_update(UpdateRequest::delta(vec![0u8; 64], vec![0, 1]), now);
     while let Some(f) = sender.poll_fragment(now) {

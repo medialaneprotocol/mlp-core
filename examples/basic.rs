@@ -16,7 +16,10 @@ fn main() {
 
     let payload = vec![0u8; 1024];
     match sender.enqueue_update(UpdateRequest::delta(payload, vec![0, 1]), now) {
-        mlp_core::media::sender::EnqueueOutcome::Accepted { object_id, fragments } => {
+        mlp_core::media::sender::EnqueueOutcome::Accepted {
+            object_id,
+            fragments,
+        } => {
             println!("accepted object {} ({} fragments)", object_id, fragments);
         }
         other => println!("not accepted: {:?}", other),

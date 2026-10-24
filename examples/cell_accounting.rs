@@ -1,6 +1,6 @@
 //! Cell accounting: per-receiver convergence tracking.
-use mlp_core::media::cells::CellGrid;
 use mlp_core::media::cells::CellAccounting;
+use mlp_core::media::cells::CellGrid;
 
 fn main() {
     let grid = CellGrid::with_cell_size(320, 240, 64);

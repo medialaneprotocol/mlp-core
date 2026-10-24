@@ -1,6 +1,6 @@
 //! Pacer example: token bucket.
 
-use mlp_core::media::pacer::{PacerConfig, MediaPacer};
+use mlp_core::media::pacer::{MediaPacer, PacerConfig};
 use mlp_core::media::pdu::Carrier;
 use std::time::Instant;
 

@@ -17,6 +17,9 @@ fn main() {
     bytes.extend_from_slice(&0_u16.to_le_bytes()); // header ext length
 
     let (fragment, consumed) = Fragment::parse(&bytes, Carrier::Ws).unwrap();
-    println!("parsed fragment: class={:?}, consumed={}", fragment.header.class, consumed);
+    println!(
+        "parsed fragment: class={:?}, consumed={}",
+        fragment.header.class, consumed
+    );
     let _ = Instant::now();
 }

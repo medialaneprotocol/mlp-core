@@ -1,4 +1,4 @@
-use mlp_core::media::pdu::{Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, UpdateMeta};
+use mlp_core::media::pdu::{Fragment, FragmentClass, FragmentFlags, Priority, UpdateMeta};
 fn main() {
     let meta = UpdateMeta {
         update_id: 7,
@@ -21,9 +21,12 @@ fn main() {
         0,
         2,
         ext,
-        vec![1,2,3,4],
-    ).unwrap();
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
     let bytes = frag.encode();
-    for b in &bytes { print!("{:02x}", b); }
+    for b in &bytes {
+        print!("{:02x}", b);
+    }
     println!();
 }

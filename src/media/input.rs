@@ -373,10 +373,22 @@ impl InputQueueConfig {
         (2.0 * rtt_ms).round().clamp(5_000.0, 30_000.0) as u64
     }
 
-    pub fn with_max_objects(mut self, v: usize) -> Self { self.max_objects = v; self }
-    pub fn with_max_bytes(mut self, v: usize) -> Self { self.max_bytes = v; self }
-    pub fn with_deadline_ms(mut self, v: u64) -> Self { self.deadline_ms = v; self }
-    pub fn with_pressed_heartbeat_ms(mut self, v: u64) -> Self { self.pressed_heartbeat_ms = v; self }
+    pub fn with_max_objects(mut self, v: usize) -> Self {
+        self.max_objects = v;
+        self
+    }
+    pub fn with_max_bytes(mut self, v: usize) -> Self {
+        self.max_bytes = v;
+        self
+    }
+    pub fn with_deadline_ms(mut self, v: u64) -> Self {
+        self.deadline_ms = v;
+        self
+    }
+    pub fn with_pressed_heartbeat_ms(mut self, v: u64) -> Self {
+        self.pressed_heartbeat_ms = v;
+        self
+    }
 }
 
 /// What happened to a pushed input object.
@@ -833,9 +845,18 @@ impl Default for HostInputConfig {
 }
 
 impl HostInputConfig {
-    pub fn with_dedup_window(mut self, v: usize) -> Self { self.dedup_window = v; self }
-    pub fn with_worker_capacity(mut self, v: usize) -> Self { self.worker_capacity = v; self }
-    pub fn with_key_release_grace_ms(mut self, v: u64) -> Self { self.key_release_grace_ms = v; self }
+    pub fn with_dedup_window(mut self, v: usize) -> Self {
+        self.dedup_window = v;
+        self
+    }
+    pub fn with_worker_capacity(mut self, v: usize) -> Self {
+        self.worker_capacity = v;
+        self
+    }
+    pub fn with_key_release_grace_ms(mut self, v: u64) -> Self {
+        self.key_release_grace_ms = v;
+        self
+    }
 }
 
 /// Sender-side input state: dedup, deadline, pressed set and releases.

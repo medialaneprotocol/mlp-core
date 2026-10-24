@@ -23,7 +23,7 @@ pub const MAX_CELL_SIZE: u32 = 256;
 /// Repair rounds after which a cell escalates to P0 (MLP spec §8).
 pub const REPAIR_MAX_ROUNDS: u8 = 4;
 /// The floor of the repair delay on datagram carriers.
-pub const REPAIR_DELAY_DATAGRAM_FLOOR_MS: u64 = 250;
+pub const REPAIR_DELAY_DATAGRAM_FLOOR_MS: u64 = 50;
 /// The ceiling of the repair delay on datagram carriers.
 pub const REPAIR_DELAY_DATAGRAM_CEIL_MS: u64 = 5_000;
 /// The ceiling of the repair delay on stream carriers.
@@ -691,7 +691,7 @@ impl CellAccounting {
         if stuck.len() > self.stuck_cells.len() {
             self.counters.repair_stuck_cells += (stuck.len() - self.stuck_cells.len()) as u64;
         }
-        self.stuck_cells = stuck.clone();
+        self.stuck_cells.clone_from(&stuck);
         stuck
     }
 
@@ -907,8 +907,10 @@ mod tests {
     #[test]
     fn unacked_cells_become_due_after_the_repair_delay() {
         let mut accounting = accounting(200, 200, false);
-        // Stream repair delay = clamp(rtt + update_interval, 250, 3000) = 250.
-        assert_eq!(accounting.repair_delay_ms(), 250);
+        // Stream repair delay = clamp(rtt + update_interval, 50, 3000) = 183
+        // (the old 250 ms floor used to clamp it up; the floor now only
+        // guards an unmeasured round trip).
+        assert_eq!(accounting.repair_delay_ms(), 183);
         accounting.mark_emitted(1, &[0, 1], 0);
         assert!(accounting.due_cells(100).is_empty(), "not due yet");
         let due = accounting.due_cells(300);
@@ -924,8 +926,8 @@ mod tests {
         assert_eq!(accounting.repair_delay_ms(), 1_600);
         accounting.set_rtt_ms(3_000.0);
         assert_eq!(accounting.repair_delay_ms(), 5_000, "ceiling");
-        accounting.set_rtt_ms(50.0);
-        assert_eq!(accounting.repair_delay_ms(), 250, "floor");
+        accounting.set_rtt_ms(10.0);
+        assert_eq!(accounting.repair_delay_ms(), 50, "floor");
     }
 
     #[test]

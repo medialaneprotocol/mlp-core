@@ -255,6 +255,11 @@ pub struct MediaPacer {
     config: PacerConfig,
     bucket: TokenBucket,
     window: VecDeque<(Instant, u64)>,
+    /// Running sum of `window`'s bytes: the release path asks the window
+    /// budget per fragment, and a lane at rate grants thousands of fragments
+    /// per second — a per-ask walk of the whole window is traffic the pacer
+    /// pays on every fragment it releases.
+    window_sum: u64,
     rtt: Duration,
 }
 
@@ -274,6 +279,7 @@ impl MediaPacer {
             config,
             bucket,
             window: VecDeque::new(),
+            window_sum: 0,
             rtt: Duration::ZERO,
         }
     }
@@ -380,6 +386,7 @@ impl MediaPacer {
     pub fn record_window(&mut self, bytes: u64, now: Instant) {
         self.purge_window(now);
         self.window.push_back((now, bytes));
+        self.window_sum = self.window_sum.saturating_add(bytes);
     }
 
     /// Try to acquire `bytes` for `class`; on success the tokens and the window
@@ -392,6 +399,7 @@ impl MediaPacer {
                 let granted = self.bucket.try_consume(bytes as f64);
                 debug_assert!(granted, "check said the tokens were there");
                 self.window.push_back((now, bytes));
+                self.window_sum = self.window_sum.saturating_add(bytes);
                 AcquireResult::Granted
             }
             refusal => refusal,
@@ -434,7 +442,7 @@ impl MediaPacer {
             };
         }
         let window_budget = self.window_budget_bytes();
-        let window_used: u64 = self.window.iter().map(|(_, bytes)| *bytes).sum();
+        let window_used = self.window_sum;
         if window_used + bytes > window_budget {
             let rate = (self.config.pace_bps as f64 / 8.0).max(1.0);
             let deficit = (window_used + bytes).saturating_sub(window_budget);
@@ -466,8 +474,9 @@ impl MediaPacer {
 
     fn purge_window(&mut self, now: Instant) {
         let cutoff = now.checked_sub(self.config.window).unwrap_or(now);
-        while let Some((at, _)) = self.window.front() {
+        while let Some((at, bytes)) = self.window.front() {
             if *at <= cutoff {
+                self.window_sum = self.window_sum.saturating_sub(*bytes);
                 self.window.pop_front();
             } else {
                 break;

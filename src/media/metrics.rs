@@ -96,11 +96,23 @@ impl PrometheusTelemetry {
 impl std::fmt::Debug for PrometheusTelemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrometheusTelemetry")
-            .field("fragments_sent", &self.fragments_sent.load(Ordering::Relaxed))
-            .field("fragments_received", &self.fragments_received.load(Ordering::Relaxed))
+            .field(
+                "fragments_sent",
+                &self.fragments_sent.load(Ordering::Relaxed),
+            )
+            .field(
+                "fragments_received",
+                &self.fragments_received.load(Ordering::Relaxed),
+            )
             .field("bytes_sent", &self.bytes_sent.load(Ordering::Relaxed))
-            .field("bytes_received", &self.bytes_received.load(Ordering::Relaxed))
-            .field("updates_applied", &self.updates_applied.load(Ordering::Relaxed))
+            .field(
+                "bytes_received",
+                &self.bytes_received.load(Ordering::Relaxed),
+            )
+            .field(
+                "updates_applied",
+                &self.updates_applied.load(Ordering::Relaxed),
+            )
             .field("convergences", &self.convergences.load(Ordering::Relaxed))
             .field("losses", &self.losses.load(Ordering::Relaxed))
             .field("echoes", &self.echoes.load(Ordering::Relaxed))

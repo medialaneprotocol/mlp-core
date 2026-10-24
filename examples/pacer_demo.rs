@@ -7,7 +7,7 @@ use std::time::Instant;
 fn main() {
     let now = Instant::now();
     let cfg = PacerConfig::for_carrier(Carrier::Ws, 8_000, 8_192);
-    let mut pacer = MediaPacer::with_config(cfg, now);
+    let pacer = MediaPacer::with_config(cfg, now);
     println!("budget={}", pacer.window_budget_bytes());
     println!("max_grant={}", pacer.max_grant_bytes());
     println!("pace_bps={}", pacer.pace_bps());

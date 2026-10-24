@@ -25,38 +25,38 @@ pub mod error;
 #[cfg(feature = "fec")]
 pub mod fec;
 pub mod flow;
-pub mod loss;
-pub mod qos;
 pub mod input;
 pub mod lifecycle;
+pub mod loss;
+pub mod metrics;
+pub mod migration;
 pub mod object;
 #[cfg(feature = "pacing")]
 pub mod pacer;
 pub mod pdu;
+pub mod probe;
+pub mod qos;
 pub mod receiver;
 #[cfg(feature = "resume")]
 pub mod resume;
-pub mod ticket;
-pub mod migration;
-pub mod probe;
-pub mod metrics;
 pub mod scheduler;
 pub mod sender;
+pub mod ticket;
 
 pub use bwe::{BandwidthEstimator, BweConfig, BweMode, Estimate, PriorStore, ProbeRequest};
 pub use error::{MediaErrorCode, RejectReason};
 #[cfg(feature = "fec")]
 pub use fec::{build_parity_fragment, recover_one, xor_parity};
 pub use flow::{ConnectionFlowControl, FlowControl, StreamFlowControl};
-pub use loss::LossDetector;
-pub use qos::{QosPolicy, QosTier, allocate_bandwidth};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
+pub use loss::LossDetector;
 #[cfg(feature = "pacing")]
 pub use pacer::{AcquireResult, MediaPacer, PacerConfig, TokenBucket};
 pub use pdu::{
     Carrier, Fragment, FragmentClass, FragmentFlags, FragmentHeader, HeaderExt, Priority,
     TrafficClass, UpdateMeta,
 };
+pub use qos::{QosPolicy, QosTier, allocate_bandwidth};
 pub use receiver::{MediaReceiveEvent, MediaReceiverConfig, MediaReceiverMachine, ReceiverStats};
 pub use sender::{
     EnqueueOutcome, MediaSenderConfig, MediaSenderEvent, MediaSenderInput, MediaSenderMachine,
@@ -183,7 +183,7 @@ impl ControlKind {
             Self::Hello => "hello",
             Self::HelloAck => "hello_ack",
             Self::Resume => "resume",
-#[cfg(feature = "resume")]
+            #[cfg(feature = "resume")]
             Self::ResumeAck => "resume_ack",
             Self::LaneState => "lane_state",
             Self::AnchorPlan => "anchor_plan",
@@ -379,7 +379,7 @@ impl MediaControlObject {
             Self::Hello(_) => ControlKind::Hello,
             Self::HelloAck(_) => ControlKind::HelloAck,
             Self::Resume(_) => ControlKind::Resume,
-#[cfg(feature = "resume")]
+            #[cfg(feature = "resume")]
             Self::ResumeAck(_) => ControlKind::ResumeAck,
             Self::LaneState(_) => ControlKind::LaneState,
             Self::AnchorPlan(_) => ControlKind::AnchorPlan,
@@ -396,11 +396,7 @@ impl MediaControlObject {
     pub fn is_urgent(&self) -> bool {
         let base = matches!(
             self,
-            Self::Hello(_)
-                | Self::HelloAck(_)
-                | Self::Resume(_)
-                | Self::Close(_)
-                | Self::Error(_)
+            Self::Hello(_) | Self::HelloAck(_) | Self::Resume(_) | Self::Close(_) | Self::Error(_)
         );
         #[cfg(feature = "resume")]
         let extra = matches!(self, Self::ResumeAck(_));

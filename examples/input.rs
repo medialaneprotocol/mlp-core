@@ -1,7 +1,6 @@
 //! Input queue example: push pointer moves and take ready.
 
 use mlp_core::media::input::{InputQueueConfig, ViewerInputQueue};
-use std::time::Instant;
 
 fn main() {
     let now_ms = 0u64;

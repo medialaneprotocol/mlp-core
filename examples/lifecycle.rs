@@ -1,9 +1,9 @@
 //! Lifecycle example: lane policy and state.
 
-use mlp_core::media::lifecycle::MediaLanePolicy;
-use mlp_core::media::sender::{MediaSenderConfig, MediaSenderMachine};
 use mlp_core::media::cells::CellGrid;
+use mlp_core::media::lifecycle::MediaLanePolicy;
 use mlp_core::media::pdu::Carrier;
+use mlp_core::media::sender::{MediaSenderConfig, MediaSenderMachine};
 use std::time::Instant;
 
 fn main() {

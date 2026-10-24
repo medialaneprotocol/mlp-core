@@ -14,7 +14,10 @@ fn main() {
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
             .collect();
         match mlp_core::media::pdu::Fragment::parse(&bytes, mlp_core::media::pdu::Carrier::Ws) {
-            Ok((frag, consumed)) => println!("{}: parsed {} bytes, object_id={}", name, consumed, frag.header.object_id),
+            Ok((frag, consumed)) => println!(
+                "{}: parsed {} bytes, object_id={}",
+                name, consumed, frag.header.object_id
+            ),
             Err(e) => println!("{}: parse error {:?}", name, e),
         }
     }

@@ -229,11 +229,26 @@ impl Default for PlanConfig {
 }
 
 impl PlanConfig {
-    pub fn with_anchor_threshold(mut self, v: u32) -> Self { self.anchor_threshold = v; self }
-    pub fn with_min_interval_ms(mut self, v: u64) -> Self { self.min_interval_ms = v; self }
-    pub fn with_rtt_ms(mut self, v: f64) -> Self { self.rtt_ms = v; self }
-    pub fn with_deadline_floor_ms(mut self, v: u64) -> Self { self.deadline_floor_ms = v; self }
-    pub fn with_priority(mut self, v: u8) -> Self { self.priority = v; self }
+    pub fn with_anchor_threshold(mut self, v: u32) -> Self {
+        self.anchor_threshold = v;
+        self
+    }
+    pub fn with_min_interval_ms(mut self, v: u64) -> Self {
+        self.min_interval_ms = v;
+        self
+    }
+    pub fn with_rtt_ms(mut self, v: f64) -> Self {
+        self.rtt_ms = v;
+        self
+    }
+    pub fn with_deadline_floor_ms(mut self, v: u64) -> Self {
+        self.deadline_floor_ms = v;
+        self
+    }
+    pub fn with_priority(mut self, v: u8) -> Self {
+        self.priority = v;
+        self
+    }
 
     /// `plan_deadline = 2 × RTT + 30 s`.
     pub fn deadline_ms(&self) -> u64 {
@@ -578,14 +593,38 @@ impl Default for SchedulerConfig {
 }
 
 impl SchedulerConfig {
-    pub fn with_cell_bytes(mut self, v: u32) -> Self { self.cell_bytes = v; self }
-    pub fn with_idle_interval_floor_ms(mut self, v: u64) -> Self { self.idle_interval_floor_ms = v; self }
-    pub fn with_idle_interval_ceiling_ms(mut self, v: u64) -> Self { self.idle_interval_ceiling_ms = v; self }
-    pub fn with_pulse_window_floor_ms(mut self, v: u64) -> Self { self.pulse_window_floor_ms = v; self }
-    pub fn with_pulse_fps_multiplier(mut self, v: f64) -> Self { self.pulse_fps_multiplier = v; self }
-    pub fn with_max_parts_stream(mut self, v: u16) -> Self { self.max_parts_stream = v; self }
-    pub fn with_max_parts_datagram(mut self, v: u16) -> Self { self.max_parts_datagram = v; self }
-    pub fn with_single_part_loss_ratio(mut self, v: f64) -> Self { self.single_part_loss_ratio = v; self }
+    pub fn with_cell_bytes(mut self, v: u32) -> Self {
+        self.cell_bytes = v;
+        self
+    }
+    pub fn with_idle_interval_floor_ms(mut self, v: u64) -> Self {
+        self.idle_interval_floor_ms = v;
+        self
+    }
+    pub fn with_idle_interval_ceiling_ms(mut self, v: u64) -> Self {
+        self.idle_interval_ceiling_ms = v;
+        self
+    }
+    pub fn with_pulse_window_floor_ms(mut self, v: u64) -> Self {
+        self.pulse_window_floor_ms = v;
+        self
+    }
+    pub fn with_pulse_fps_multiplier(mut self, v: f64) -> Self {
+        self.pulse_fps_multiplier = v;
+        self
+    }
+    pub fn with_max_parts_stream(mut self, v: u16) -> Self {
+        self.max_parts_stream = v;
+        self
+    }
+    pub fn with_max_parts_datagram(mut self, v: u16) -> Self {
+        self.max_parts_datagram = v;
+        self
+    }
+    pub fn with_single_part_loss_ratio(mut self, v: f64) -> Self {
+        self.single_part_loss_ratio = v;
+        self
+    }
 }
 
 impl SchedulerConfig {

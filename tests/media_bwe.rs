@@ -41,6 +41,20 @@ fn sent_at_pace(estimator: &mut BandwidthEstimator, window_ms: u64, now: Instant
     estimator.on_send(bytes.max(1), 1, now);
 }
 
+/// Drive the estimator into `Steady` the way a real lane does: the ramp
+/// doubles until the link's goodput refuses the next step, and that overshoot
+/// — not a report cap — is what exits `StartUp`.
+fn to_steady(estimator: &mut BandwidthEstimator, rtt_ms: u32, goodput_bps: u64, now: Instant) {
+    for _ in 0..16 {
+        estimator.on_feedback(&healthy(rtt_ms, goodput_bps), now);
+    }
+    assert_eq!(
+        estimator.mode(),
+        BweMode::Steady,
+        "the ramp settles at 0.9 × {goodput_bps}"
+    );
+}
+
 #[test]
 fn startup_doubles_per_report_then_settles() {
     let now = Instant::now();
@@ -49,26 +63,26 @@ fn startup_doubles_per_report_then_settles() {
     assert_eq!(estimator.pace_bps(), 8_000, "no prior starts at the floor");
     let mut paces = vec![estimator.pace_bps()];
     for _ in 0..4 {
-        estimator.on_feedback(&healthy(10, 10_000_000), now);
+        estimator.on_feedback(&healthy(10, 50_000), now);
         paces.push(estimator.pace_bps());
     }
-    // 0.9 × btlbw where btlbw is the 10 Mbps goodput.
-    assert_eq!(paces, vec![8_000, 16_000, 32_000, 64_000, 9_000_000]);
+    // The link carries the doublings up to 64 kbps (50 kbps of goodput
+    // answers every ask up to 57.6) and refuses the one past it: that
+    // overshoot settles StartUp at 0.9 × btlbw = 45 kbps.
+    assert_eq!(paces, vec![8_000, 16_000, 32_000, 64_000, 45_000]);
     assert_eq!(
         estimator.mode(),
         BweMode::Steady,
-        "the fourth report exits StartUp"
+        "the refused doubling exits StartUp"
     );
-    assert!(estimator.pace_bps() <= 10_000_000);
+    assert!(estimator.pace_bps() <= 50_000);
 }
 
 #[test]
 fn loss_above_two_percent_decays_btlbw_and_five_percent_degrades() {
     let now = Instant::now();
     let mut estimator = BandwidthEstimator::new(BweConfig::default());
-    for _ in 0..4 {
-        estimator.on_feedback(&healthy(50, 2_000_000), now);
-    }
+    to_steady(&mut estimator, 50, 2_000_000, now);
     let steady = estimator.pace_bps();
     let btlbw = estimator.btlbw_bps();
     // 3 % loss at the same goodput: the decay is re-raised by the window's
@@ -99,9 +113,7 @@ fn loss_above_two_percent_decays_btlbw_and_five_percent_degrades() {
 fn three_healthy_reports_climb_back_out_of_degraded() {
     let now = Instant::now();
     let mut estimator = BandwidthEstimator::new(BweConfig::default());
-    for _ in 0..4 {
-        estimator.on_feedback(&healthy(50, 2_000_000), now);
-    }
+    to_steady(&mut estimator, 50, 2_000_000, now);
     sent_at_pace(&mut estimator, 1_000, now);
     estimator.on_feedback(&lossy(50, 1_000_000, 0.20), now);
     assert!(matches!(
@@ -140,7 +152,7 @@ fn the_floor_is_never_crossed() {
     }
     assert_eq!(dead.mode(), BweMode::Floor);
     assert_eq!(dead.pace_bps(), 8_000);
-    let estimate = dead.estimate();
+    let estimate = dead.estimate_at(now);
     assert_eq!(estimate.pace_bps, 8_000);
     assert!(estimate.budget_bytes >= 256);
     assert!(estimate.budget_bytes <= 1_048_576);
@@ -160,7 +172,7 @@ fn no_feedback_uses_the_emergency_profile_and_one_report_clears_it() {
     assert_ne!(estimator.mode(), BweMode::NoFeedback);
     estimator.on_timeout(now + grace + Duration::from_millis(1));
     assert_eq!(estimator.mode(), BweMode::NoFeedback);
-    let estimate = estimator.estimate();
+    let estimate = estimator.estimate_at(now);
     assert_eq!(estimate.pace_bps, 16_000, "floor × 2");
     assert_eq!(estimate.target_fps, 1.0);
     assert_eq!(estimate.max_object_bytes, 1_024);
@@ -185,7 +197,7 @@ fn budgets_follow_the_design_formulas() {
     for _ in 0..8 {
         fast.on_feedback(&healthy(5, 10_000_000), now);
     }
-    let estimate = fast.estimate();
+    let estimate = fast.estimate_at(now);
     assert_eq!(estimate.target_fps, 30.0);
     let expected_budget = (estimate.pace_bytes_per_sec() * (1_000.0 / 30.0) / 1_000.0) as u32;
     assert!((estimate.budget_bytes as i64 - i64::from(expected_budget)).abs() <= 1);
@@ -203,7 +215,7 @@ fn budgets_follow_the_design_formulas() {
     for _ in 0..4 {
         slow.on_feedback(&healthy(1_400, 32_000), now);
     }
-    let estimate = slow.estimate();
+    let estimate = slow.estimate_at(now);
     assert_eq!(estimate.target_fps, 1.0, "live floors fps at 1");
     assert!(
         estimate.budget_bytes <= 4_000,
@@ -222,7 +234,7 @@ fn max_object_bytes_is_about_one_rtt_of_airtime() {
         for _ in 0..4 {
             estimator.on_feedback(&healthy(rtt_ms, pace_bps), now);
         }
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         let rtt_seconds = (f64::from(rtt_ms) / 1_000.0).max(0.5);
         let airtime = estimate.max_object_bytes as f64 / estimate.pace_bytes_per_sec();
         assert!(
@@ -236,14 +248,14 @@ fn max_object_bytes_is_about_one_rtt_of_airtime() {
 fn probes_follow_the_documented_trigger_and_response() {
     let now = Instant::now();
     let mut estimator = BandwidthEstimator::new(BweConfig::default());
-    for _ in 0..6 {
-        estimator.on_feedback(&healthy(100, 1_000_000), now);
-    }
-    assert_eq!(estimator.mode(), BweMode::Steady);
+    to_steady(&mut estimator, 100, 1_000_000, now);
     let before = estimator.btlbw_bps();
     let probe = estimator.probe_due(now).expect("the first probe");
     // `payload_bytes = min(8 192, 0.25 × pace/8)`.
     assert!(probe.payload_bytes <= 8_192);
+    // The probe steps above the estimate — `1.25 × max(btlbw, pace)` — never
+    // below it.
+    assert!(probe.rate_bps > before);
     assert!(probe.rate_bps <= (1.25 * before as f64) as u64 + 1);
     assert!(
         estimator
@@ -280,6 +292,40 @@ fn probes_follow_the_documented_trigger_and_response() {
         now,
     );
     assert_eq!(estimator.btlbw_bps(), (after as f64 * 0.9).round() as u64);
+}
+
+/// **The estimate must be able to grow in `Steady` (the freeze regression).**
+///
+/// `pace = 0.9 × btlbw` caps the sender's own goodput at `0.9 × btlbw`, and a
+/// probe paced at `min(1.25 × btlbw, 1.25 × pace)` tested a rate *below* the
+/// estimate — so nothing in the old `Steady` could ever raise `btlbw`, and a
+/// healthy lane froze at whatever the first four reports reached. The ramp
+/// re-entry (three healthy, filled, over-demand windows) and the probe's
+/// pacing gain are what let a lane with sustained demand climb again.
+#[test]
+fn steady_grows_under_sustained_demand_beyond_the_first_ramp() {
+    let now = Instant::now();
+    let mut estimator = BandwidthEstimator::new(BweConfig::default());
+    // A 200 kbps link settles the first ramp at ~180 kbps.
+    to_steady(&mut estimator, 50, 200_000, now);
+    let settled = estimator.pace_bps();
+    // The link widens to 5 Mbps and the sender always has demand for more
+    // than the pace: the lane must climb past the first ramp's ceiling.
+    for _ in 0..48 {
+        sent_at_pace(&mut estimator, 1_000, now);
+        estimator.on_demand(estimator.pace_bps() * 2, now);
+        estimator.on_feedback(&healthy(50, 5_000_000), now);
+    }
+    assert!(
+        estimator.pace_bps() > 20 * settled,
+        "the estimate froze at {settled}: {}",
+        estimator.pace_bps()
+    );
+    assert!(
+        estimator.pace_bps() >= 4_000_000,
+        "the climb should reach the link: {}",
+        estimator.pace_bps()
+    );
 }
 
 #[test]
@@ -394,7 +440,7 @@ fn every_rule_holds_at_ten_fifteen_four_hundred_and_two_thousand_ms_rtt() {
             round_trip(&mut estimator, f64::from(rtt_ms), now);
             estimator.on_feedback(&healthy(rtt_ms, goodput), now);
         }
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         assert!(
             (8_000..=50_000_000).contains(&estimate.pace_bps),
             "rtt {rtt_ms}: pace {}",
@@ -432,7 +478,7 @@ fn the_estimator_is_deterministic_across_runs() {
             estimator.on_feedback(&feedback(rtt, goodput / 8, 100, lost, 1_000), now);
             estimator.on_timeout(now + Duration::from_millis(u64::from(step) * 100));
         }
-        estimator.estimate()
+        estimator.estimate_at(now)
     };
     assert_eq!(run(), run());
 }

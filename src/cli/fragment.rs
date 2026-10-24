@@ -442,7 +442,10 @@ mod tests {
     #[test]
     fn a_class_name_names_a_class() {
         assert_eq!(parse_class("media").expect("class"), FragmentClass::Media);
-        assert_eq!(parse_class("datagram").expect("class"), FragmentClass::Datagram);
+        assert_eq!(
+            parse_class("datagram").expect("class"),
+            FragmentClass::Datagram
+        );
         assert!(parse_class("nonsense").is_err());
     }
 

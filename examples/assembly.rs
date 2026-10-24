@@ -1,6 +1,6 @@
 //! Object assembly example.
 
-use mlp_core::media::object::{ObjectAssembler, AssemblyConfig};
+use mlp_core::media::object::{AssemblyConfig, ObjectAssembler};
 use std::time::Instant;
 
 fn main() {

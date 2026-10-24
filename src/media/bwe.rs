@@ -65,7 +65,9 @@ pub struct BweConfig {
     pub rtt_horizon: Duration,
     /// Regular probe interval in `Steady`.
     pub probe_interval: Duration,
-    /// Maximum reports in `StartUp` before the state machine forces `Steady`.
+    /// Safety cap on reports in `StartUp`. The ramp exits on its own evidence
+    /// (the first loss, the first overshoot, the ceiling); the cap only bounds
+    /// a pathological lane that never shows any.
     pub startup_max_reports: u32,
     /// `min_delta_bytes` below which `target_fps` is reduced (MLP spec §6.2.5).
     pub min_delta_bytes: u64,
@@ -124,12 +126,30 @@ impl BweConfig {
         self
     }
 
-    pub fn with_rtt_horizon(mut self, v: Duration) -> Self { self.rtt_horizon = v; self }
-    pub fn with_probe_interval(mut self, v: Duration) -> Self { self.probe_interval = v; self }
-    pub fn with_startup_max_reports(mut self, v: u32) -> Self { self.startup_max_reports = v; self }
-    pub fn with_min_delta_bytes(mut self, v: u64) -> Self { self.min_delta_bytes = v; self }
-    pub fn with_probe_payload_max(mut self, v: u32) -> Self { self.probe_payload_max = v; self }
-    pub fn with_prior_ttl(mut self, v: Duration) -> Self { self.prior_ttl = v; self }
+    pub fn with_rtt_horizon(mut self, v: Duration) -> Self {
+        self.rtt_horizon = v;
+        self
+    }
+    pub fn with_probe_interval(mut self, v: Duration) -> Self {
+        self.probe_interval = v;
+        self
+    }
+    pub fn with_startup_max_reports(mut self, v: u32) -> Self {
+        self.startup_max_reports = v;
+        self
+    }
+    pub fn with_min_delta_bytes(mut self, v: u64) -> Self {
+        self.min_delta_bytes = v;
+        self
+    }
+    pub fn with_probe_payload_max(mut self, v: u32) -> Self {
+        self.probe_payload_max = v;
+        self
+    }
+    pub fn with_prior_ttl(mut self, v: Duration) -> Self {
+        self.prior_ttl = v;
+        self
+    }
 }
 
 /// The estimator's output: the only numbers the encoder may spend.
@@ -265,6 +285,20 @@ impl InternalState {
 /// confirm.
 pub const PROBE_STEP_HEADROOM: f64 = 1.25;
 
+/// The pacing gain a probe window applies to the sender's own traffic (MLP
+/// spec §6.2.6).
+///
+/// A probe that is only its own tiny object tests nothing: the object is
+/// capped at [`BweConfig::probe_payload_max`], which is noise next to the
+/// lane's rate. What a probe really tests is the **step above the estimate**
+/// carried by the sender's own traffic during the probe window — the estimate
+/// answers that window with `pace × 1.25`, the link carries it or it does
+/// not, and the receiver's goodput over that window is the measurement the
+/// max-filter reads (§6.2.3). Without the gain the estimate can only ever
+/// confirm what it already paces — `goodput ≤ pace = 0.9 × btlbw` — and a
+/// healthy lane freezes at whatever StartUp reached.
+pub const PROBE_PACING_GAIN: f64 = 1.25;
+
 /// The loss above which the link counts as degraded (MLP spec §6.2.4,
 /// §6.7.1).
 ///
@@ -307,6 +341,13 @@ pub struct BandwidthEstimator {
     last_probe_at: Option<Instant>,
     probe_due: bool,
     probe_pending: Option<PendingProbe>,
+    /// While set, the pacing-gain window of the in-flight probe: the estimate
+    /// answers `pace × PROBE_PACING_GAIN` until this instant, so the window's
+    /// goodput measures the step (see [`PROBE_PACING_GAIN`]).
+    probe_gain_until: Option<Instant>,
+    /// Consecutive healthy windows in `Steady` whose demand exceeded the
+    /// pace: the condition that re-opens `StartUp`'s doubling.
+    steady_ramp_reports: u32,
     sent_objects: u64,
     sent_bytes: u64,
     /// Bytes sent since the last report: the window's own traffic.
@@ -358,6 +399,8 @@ impl BandwidthEstimator {
             last_probe_at: None,
             probe_due: false,
             probe_pending: None,
+            probe_gain_until: None,
+            steady_ramp_reports: 0,
             sent_objects: 0,
             sent_bytes: 0,
             window_sent_bytes: 0,
@@ -436,6 +479,13 @@ impl BandwidthEstimator {
     }
 
     /// `report_interval_ms = clamp(4 × rtt_min_ms, 250, 2 000)`.
+    ///
+    /// The floor is load-bearing, not a bound on chatter: a window shorter
+    /// than a quarter second samples too few objects for its loss reading to
+    /// mean anything on a lossy tier (three updates, none lost, reads
+    /// "healthy"), and the estimator that steps on that reading oscillates.
+    /// A fast lane converges through the ramp's doubling and the probes, not
+    /// through shorter windows.
     pub fn report_interval(&self) -> Duration {
         let interval = (4.0 * self.rtt_min_ms).clamp(250.0, 2_000.0);
         Duration::from_secs_f64(interval / 1_000.0)
@@ -490,6 +540,13 @@ impl BandwidthEstimator {
     /// The last sign of life from the peer, if any.
     pub fn last_evidence_at(&self) -> Option<Instant> {
         self.last_evidence_at
+    }
+
+    /// Whether the last closed window was capacity-limited: the sender sent
+    /// at (or above) its own pace, so the window's loss reading is a real
+    /// measurement of a link that was actually exercised.
+    pub fn last_window_capacity_limited(&self) -> bool {
+        self.capacity_limited
     }
 
     fn note_evidence(&mut self, now: Instant) {
@@ -674,6 +731,30 @@ impl BandwidthEstimator {
             }
             InternalState::Steady => {
                 self.pace_bps = 0.9 * self.btlbw_bps;
+                // The ramp re-entry: a lane whose demand keeps exceeding a
+                // healthy, *filled* pace is a lane the estimate has frozen
+                // below its capacity, and the only way the estimate finds
+                // that out is to ask for more (StartUp's doubling). The
+                // filled-window condition is the evidence: a window the
+                // sender did not fill reports a small-sample loss (three
+                // objects, none lost, reads "healthy") and says nothing
+                // about the link's capacity — ramping on it is the
+                // oscillation between burst and decay. Overshoot ends the
+                // ramp the same way it ended the first one.
+                let delay_ok =
+                    self.queue_delay_ms == 0.0 || self.queue_delay_ms < 0.5 * self.rtt_min_ms;
+                if loss < 0.01
+                    && delay_ok
+                    && self.capacity_limited
+                    && self.demand_bps > self.pace_bps
+                {
+                    self.steady_ramp_reports += 1;
+                } else {
+                    self.steady_ramp_reports = 0;
+                }
+                if self.steady_ramp_reports >= 3 {
+                    self.transition(InternalState::StartUp);
+                }
                 if loss > LOSS_DEGRADED || self.queue_delay_ms > 1.0 * self.rtt_min_ms {
                     self.transition(InternalState::Degraded);
                 }
@@ -728,6 +809,7 @@ impl BandwidthEstimator {
         self.state = next;
         self.reports_in_state = 0;
         self.healthy_reports = 0;
+        self.steady_ramp_reports = 0;
     }
 
     /// Feed one hop report (MLP spec §6.2.9, D-16).
@@ -796,13 +878,32 @@ impl BandwidthEstimator {
         }
         let payload_bytes = (0.25 * self.pace_bps / 8.0) as u32;
         let payload_bytes = payload_bytes.min(self.config.probe_payload_max).max(1);
-        let rate_bps = (1.25 * self.btlbw_bps).min(1.25 * self.pace_bps).round() as u64;
+        // The probe tests a step above the *estimate*, not above whichever of
+        // `btlbw` and `pace` is lower: pacing at `min(1.25 × btlbw, 1.25 ×
+        // pace)` tested a rate below the estimate itself whenever `pace` sat
+        // under `btlbw` (which is Steady's own rule, `pace = 0.9 × btlbw`) —
+        // a probe that could only ever confirm what was already known.
+        let rate_bps = (PROBE_STEP_HEADROOM * self.btlbw_bps.max(self.pace_bps)).round() as u64;
         let request = ProbeRequest {
             payload_bytes,
             rate_bps,
         };
         self.probe_due = false;
         self.last_probe_at = Some(now);
+        // The pacing-gain window (see [`PROBE_PACING_GAIN`]): one measurement
+        // window of the sender's own traffic at the step, so the window's
+        // goodput is a real measurement of the link carrying the step.
+        //
+        // A degraded lane does not take the gain: it has already reported
+        // (loss, queue delay) that the last rate was too much for it, and a
+        // burst on top of that report is traffic the repair ladder pays for.
+        // Its probes still measure — the object and its echo — without
+        // stepping the bulk's rate up.
+        if self.state == InternalState::Steady {
+            self.probe_gain_until = Some(now + self.report_interval());
+        } else {
+            self.probe_gain_until = None;
+        }
         self.probe_pending = Some(PendingProbe {
             request,
             send_epoch_ms: None,
@@ -815,6 +916,7 @@ impl BandwidthEstimator {
     /// Feed the outcome of the pending probe (MLP spec §6.2.6).
     pub fn on_probe_result(&mut self, outcome: &ProbeOutcome, _now: Instant) {
         self.probe_pending = None;
+        self.probe_gain_until = None;
         if outcome.delivered {
             // A probe is paced at `min(1.25 × btlbw, 1.25 × pace)` (MLP spec
             // §6.2.6): it is a **step above** the estimate, offered to find
@@ -905,8 +1007,12 @@ impl BandwidthEstimator {
     }
 
     /// Compute the current estimate (MLP spec §6.2.5).
-    pub fn estimate(&self) -> Estimate {
-        self.estimate_with_pace_floor(0)
+    ///
+    /// `now` is the caller's injected clock: the pacing-gain window of an
+    /// in-flight probe is part of the estimate, and a window is a pair of
+    /// instants (see [`PROBE_PACING_GAIN`]).
+    pub fn estimate_at(&self, now: Instant) -> Estimate {
+        self.estimate_with_pace_floor_at(0, now)
     }
 
     /// The estimate with the pace held to at least `floor_bps` (MLP spec §6.6).
@@ -922,7 +1028,7 @@ impl BandwidthEstimator {
     /// estimator the link's capacity. The no-feedback safety net keeps its own
     /// pace: without a sign of life the sender knows nothing about the link,
     /// and a plan cannot be paced on a guess.
-    pub fn estimate_with_pace_floor(&self, floor_bps: u64) -> Estimate {
+    pub fn estimate_with_pace_floor_at(&self, floor_bps: u64, now: Instant) -> Estimate {
         let ceiling = self.ceiling();
         if self.no_feedback {
             // Design §7.2.8: floor × 2, one fps, small objects, no speculation.
@@ -944,7 +1050,17 @@ impl BandwidthEstimator {
         let pace = self
             .pace_bps
             .max(self.plan_floor(floor_bps))
-            .clamp(self.config.pace_floor_bps as f64, ceiling) as u64;
+            .clamp(self.config.pace_floor_bps as f64, ceiling);
+        // The probe window's pacing gain (see [`PROBE_PACING_GAIN`]): the
+        // sender's own traffic runs at the step for one measurement window,
+        // so the goodput that window reports is the link's answer to the
+        // step. The gain never applies while the safety net holds the pace.
+        let pace = if self.probe_gain_until.is_some_and(|until| now < until) {
+            (pace * PROBE_PACING_GAIN).min(ceiling)
+        } else {
+            pace
+        };
+        let pace = pace as u64;
         let mut target_fps = self.config.requested_fps.clamp(0.5, 30.0);
         let mut budget = self.budget_for(pace, target_fps, ceiling);
         if budget < self.config.min_delta_bytes as f64 {
@@ -1128,6 +1244,18 @@ mod tests {
         estimator.on_send(bytes.max(1), 1, now);
     }
 
+    /// Drive the estimator into `Steady` the way a real lane does: the ramp
+    /// doubles until the link stops carrying it (64 kbps of goodput sustains
+    /// the doublings up to 64 kbps and refuses the one past it), and the
+    /// overshoot — not a report cap — is what exits `StartUp`.
+    fn to_steady(estimator: &mut BandwidthEstimator, now: Instant) {
+        for _ in 0..8 {
+            sent_at_pace(estimator, 1_000, now);
+            estimator.on_feedback(&feedback(10, 8_000, 100, 0, 1_000), now);
+        }
+        assert_eq!(estimator.mode(), BweMode::Steady);
+    }
+
     #[test]
     fn a_prompt_report_moves_no_estimate() {
         let now = Instant::now();
@@ -1161,16 +1289,21 @@ mod tests {
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         assert_eq!(estimator.mode(), BweMode::StartUp);
         assert_eq!(estimator.pace_bps(), 8_000);
-        // Three healthy reports: 8k → 16k → 32k → 64k.
+        // Healthy reports the link keeps carrying: 8k → 16k → 32k → 64k
+        // (256 kbps of goodput answers every doubling up to 64 kbps).
         for step in 0..3 {
+            sent_at_pace(&mut estimator, 1_000, now);
             estimator.on_feedback(
-                &feedback(10, 8_000 * 4, 100, 0, 1_000),
+                &feedback(10, 32_000, 100, 0, 1_000),
                 now + Duration::from_millis(step * 100),
             );
         }
         assert_eq!(estimator.pace_bps(), 64_000, "doubling per report");
-        // The fourth report exits StartUp: pace becomes 0.9 × btlbw.
-        estimator.on_feedback(&feedback(10, 64_000, 100, 0, 1_000), now);
+        // The report the link cannot answer — 48 kbps of goodput against a
+        // pace the doubling just took past it — is the ramp's own overshoot
+        // evidence, and it exits StartUp: pace becomes 0.9 × btlbw.
+        sent_at_pace(&mut estimator, 1_000, now);
+        estimator.on_feedback(&feedback(10, 6_000, 100, 0, 1_000), now);
         assert_eq!(estimator.mode(), BweMode::Steady);
         assert!(estimator.pace_bps() >= 57_600);
     }
@@ -1179,14 +1312,12 @@ mod tests {
     fn loss_decays_btlbw_and_enters_degraded() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..4 {
-            sent_at_pace(&mut estimator, 1_000, now);
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         let steady = estimator.pace_bps();
-        assert_eq!(estimator.mode(), BweMode::Steady);
+        // A window the sender filled, carrying ten percent loss and less than
+        // the estimate: the max-filter decays and the state degrades.
         sent_at_pace(&mut estimator, 1_000, now);
-        estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
+        estimator.on_feedback(&feedback(10, 4_000, 90, 10, 1_000), now);
         assert_eq!(estimator.mode(), BweMode::Degraded);
         assert!(estimator.pace_bps() < steady);
     }
@@ -1195,14 +1326,12 @@ mod tests {
     fn a_window_the_sender_did_not_fill_carries_no_capacity_signal() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..4 {
-            sent_at_pace(&mut estimator, 1_000, now);
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         let steady = estimator.pace_bps();
-        // The same loss, in a window the sender did not fill: the estimate
-        // stands, because the link was never asked to carry more.
-        estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
+        // The same loss, in a window the sender did not fill (no sends at
+        // all): the estimate stands, because the link was never asked to
+        // carry more.
+        estimator.on_feedback(&feedback(10, 4_000, 90, 10, 1_000), now);
         assert_eq!(estimator.pace_bps(), steady, "the estimate stands");
     }
 
@@ -1210,12 +1339,9 @@ mod tests {
     fn three_healthy_reports_return_to_startup() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..4 {
-            sent_at_pace(&mut estimator, 1_000, now);
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         sent_at_pace(&mut estimator, 1_000, now);
-        estimator.on_feedback(&feedback(10, 50_000, 90, 10, 1_000), now);
+        estimator.on_feedback(&feedback(10, 4_000, 90, 10, 1_000), now);
         assert_eq!(estimator.mode(), BweMode::Degraded);
         for _ in 0..3 {
             sent_at_pace(&mut estimator, 1_000, now);
@@ -1229,11 +1355,7 @@ mod tests {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         estimator.on_rtt_sample(10.0, now);
-        for _ in 0..4 {
-            sent_at_pace(&mut estimator, 1_000, now);
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
-        assert_eq!(estimator.mode(), BweMode::Steady);
+        to_steady(&mut estimator, now);
         // rtt_min stays 10 ms while rtt_ewma climbs: queue delay > 1 × rtt_min.
         for _ in 0..24 {
             estimator.on_rtt_sample(500.0, now);
@@ -1256,7 +1378,7 @@ mod tests {
         }
         assert_eq!(estimator.mode(), BweMode::Floor);
         assert_eq!(estimator.pace_bps(), 8_000);
-        assert_eq!(estimator.estimate().pace_bps, 8_000);
+        assert_eq!(estimator.estimate_at(now).pace_bps, 8_000);
     }
 
     #[test]
@@ -1264,7 +1386,7 @@ mod tests {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
         estimator.on_feedback(&feedback(800, 4_000, 100, 0, 1_000), now);
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         assert_eq!(estimate.target_fps, 1.0, "slow link floors fps at 1 live");
         // One second at the doubled start-up pace (16 kbps) is the budget.
         assert!(estimate.budget_bytes <= 2_100, "{}", estimate.budget_bytes);
@@ -1283,7 +1405,7 @@ mod tests {
         for _ in 0..10 {
             estimator.on_feedback(&feedback(5, 12_500_000, 1_000, 0, 1_000), now);
         }
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         assert_eq!(estimate.target_fps, 30.0);
         assert!(
             estimate.pace_bps <= 50_000_000,
@@ -1301,7 +1423,7 @@ mod tests {
         assert!(grace >= Duration::from_secs(2));
         estimator.on_timeout(now + grace + Duration::from_millis(1));
         assert_eq!(estimator.mode(), BweMode::NoFeedback);
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         assert_eq!(estimate.pace_bps, 16_000);
         assert_eq!(estimate.target_fps, 1.0);
         assert_eq!(estimate.max_object_bytes, 1_024);
@@ -1371,9 +1493,7 @@ mod tests {
     fn a_delivered_probe_is_a_sign_of_life() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..5 {
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         let probe = estimator.probe_due(now).expect("a probe is due");
         estimator.note_probe_sent(42, now);
         let grace = estimator.no_feedback_grace();
@@ -1414,14 +1534,12 @@ mod tests {
     fn probes_are_issued_in_steady_and_move_btlbw() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..5 {
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
-        assert_eq!(estimator.mode(), BweMode::Steady);
+        to_steady(&mut estimator, now);
         let before = estimator.btlbw_bps();
         let probe = estimator.probe_due(now).expect("a probe is due");
         assert!(probe.payload_bytes <= 8_192);
-        assert!(probe.rate_bps >= 100_000);
+        // The probe is a step above the estimate, never below it.
+        assert!(probe.rate_bps > before, "{} <= {}", probe.rate_bps, before);
         estimator.on_probe_result(
             &ProbeOutcome {
                 delivered: true,
@@ -1448,9 +1566,7 @@ mod tests {
     fn no_probe_without_demand_or_interval() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..5 {
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         assert!(
             estimator.probe_due(now).is_some(),
             "first probe after Steady"
@@ -1474,9 +1590,7 @@ mod tests {
     fn demand_raises_probe_urgency() {
         let now = Instant::now();
         let mut estimator = BandwidthEstimator::new(BweConfig::default());
-        for _ in 0..5 {
-            estimator.on_feedback(&feedback(10, 100_000, 100, 0, 1_000), now);
-        }
+        to_steady(&mut estimator, now);
         let _ = estimator.probe_due(now);
         estimator.on_demand(1_000_000, now);
         // A report keeps the link out of NoFeedback while demand persists.
@@ -1630,7 +1744,7 @@ mod tests {
             for _ in 0..7 {
                 estimator.on_feedback(&feedback(150, 60_000, 100, 2, 1_000), now);
             }
-            estimator.estimate()
+            estimator.estimate_at(now)
         };
         assert_eq!(run(), run());
     }

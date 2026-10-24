@@ -3,8 +3,8 @@ use mlp_core::media::pdu::{HeaderExt, tlv};
 
 fn main() {
     let mut ext = HeaderExt::new();
-    ext.push_u64(tlv::UPDATE_ID, 42);
-    ext.push_u64(tlv::GREASE, 0xDEAD_BEEF);
+    let _ = ext.push_u64(tlv::UPDATE_ID, 42);
+    let _ = ext.push_u64(tlv::GREASE, 0xDEAD_BEEF);
     let bytes = ext.encode().unwrap();
     let parsed = HeaderExt::parse(&bytes).unwrap();
     // The greasing TLV survives the round trip.

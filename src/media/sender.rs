@@ -181,13 +181,20 @@ pub struct MediaSenderConfig {
     pub carrier: Carrier,
     /// `min(carrier cap, configured cap)` for one fragment's payload.
     pub fragment_payload_max: usize,
-    /// `in_flight_cap = 2`: how many media objects may be queued *for writing*
-    /// at once (D-3 rule 4: "one object being sent + one pending replacement").
+    /// How many media objects may be queued *for writing* at once.
     ///
     /// The cap bounds the sender's own queue and what the carrier is handed —
     /// not how many updates may be in flight across the network. Delivery
     /// across the network is the cell accounting's job (MLP spec annex D, D-7), so an ack is
     /// never a throughput gate.
+    ///
+    /// The cap is **earned** (D-3 rule 4): the sender starts and stays at the
+    /// conservative shape — "one object being sent + one pending replacement"
+    /// — and pipelines up to the configured cap only after the lane has
+    /// *proved* itself healthy for three consecutive report intervals. A
+    /// lossy lane flaps its small-sample loss ratio around any threshold, so
+    /// a cap that follows that ratio flaps with it and stuffs the queue at
+    /// exactly the wrong moments; time-weighted evidence does not flap.
     pub in_flight_cap: usize,
     /// Bound on objects queued for release (MLP spec §4.2: bounded lanes).
     pub queue_cap: usize,
@@ -291,7 +298,7 @@ impl MediaSenderConfig {
         Self {
             carrier,
             fragment_payload_max: carrier.fragment_payload_max(),
-            in_flight_cap: 2,
+            in_flight_cap: 8,
             queue_cap: 8,
             queue_bytes_cap: 4 * 1024 * 1024,
             max_in_flight_wait_ms: 10_000,
@@ -446,12 +453,30 @@ impl Default for PathSelectionConfig {
 
 #[cfg(feature = "path-selection")]
 impl PathSelectionConfig {
-    pub fn with_promote_ratio(mut self, v: f64) -> Self { self.promote_ratio = v; self }
-    pub fn with_demote_ratio(mut self, v: f64) -> Self { self.demote_ratio = v; self }
-    pub fn with_sustain_rtts(mut self, v: f64) -> Self { self.sustain_rtts = v; self }
-    pub fn with_demotions_before_sticky(mut self, v: u32) -> Self { self.demotions_before_sticky = v; self }
-    pub fn with_oscillation_window_ms(mut self, v: u64) -> Self { self.oscillation_window_ms = v; self }
-    pub fn with_disable_ms(mut self, v: u64) -> Self { self.disable_ms = v; self }
+    pub fn with_promote_ratio(mut self, v: f64) -> Self {
+        self.promote_ratio = v;
+        self
+    }
+    pub fn with_demote_ratio(mut self, v: f64) -> Self {
+        self.demote_ratio = v;
+        self
+    }
+    pub fn with_sustain_rtts(mut self, v: f64) -> Self {
+        self.sustain_rtts = v;
+        self
+    }
+    pub fn with_demotions_before_sticky(mut self, v: u32) -> Self {
+        self.demotions_before_sticky = v;
+        self
+    }
+    pub fn with_oscillation_window_ms(mut self, v: u64) -> Self {
+        self.oscillation_window_ms = v;
+        self
+    }
+    pub fn with_disable_ms(mut self, v: u64) -> Self {
+        self.disable_ms = v;
+        self
+    }
 }
 
 /// One carrier switch, with the reason the driver reports as
@@ -777,6 +802,11 @@ pub struct MediaSenderMachine {
     pending_echoes: Vec<u64>,
     pending_plan_reasons: Vec<PlanStartReason>,
     last_estimate: Estimate,
+    /// Whether the lane has earned write-queue pipelining (three consecutive
+    /// report intervals under 1 % loss; see `effective_in_flight_cap`).
+    pipelining_earned: bool,
+    /// When the current run of sub-1 % loss windows began, if one is running.
+    healthy_since: Option<Instant>,
     policy: MediaLanePolicy,
     #[cfg(feature = "pacing")]
     last_pacer_wait: Option<(u64, Duration)>,
@@ -798,7 +828,7 @@ impl MediaSenderMachine {
         pacer.set_rtt(Duration::from_millis(50));
         let accounting = CellAccounting::new(grid, config.accounting);
         let scheduler = Scheduler::new(config.scheduler, config.plan);
-        let estimate = estimator.estimate();
+        let estimate = estimator.estimate_at(now);
         Self {
             config,
             estimator,
@@ -817,6 +847,8 @@ impl MediaSenderMachine {
             pending_echoes: Vec::new(),
             pending_plan_reasons: Vec::new(),
             last_estimate: estimate,
+            pipelining_earned: false,
+            healthy_since: None,
             policy: MediaLanePolicy::default(),
             #[cfg(feature = "pacing")]
             last_pacer_wait: None,
@@ -1019,7 +1051,7 @@ impl MediaSenderMachine {
             && self.last_estimate.loss_ratio < 0.01
             && self.last_estimate.rtt_ms < 50.0
             && !update.echo_critical;
-        if !fast && self.pending_writes() >= self.config.in_flight_cap {
+        if !fast && self.pending_writes() >= self.effective_in_flight_cap() {
             // The **echo's carrier** is not the bulk (MLP spec §6.3.5): it is
             // the object that carries the input sequence the receiver answers,
             // and the echo's promise is a quarter of a round trip (annex
@@ -1931,7 +1963,24 @@ impl MediaSenderMachine {
 
     /// Whether the lane is allowed to enqueue media right now.
     pub fn can_enqueue_media(&self) -> bool {
-        self.policy.emits_media() && self.in_flight() < self.config.in_flight_cap
+        self.policy.emits_media() && self.in_flight() < self.effective_in_flight_cap()
+    }
+
+    /// The write-queue cap in force: the conservative pair until the link has
+    /// *proved* itself healthy (a window with loss under 1 %), the configured
+    /// cap once it has, and the pair again the moment it stops being healthy
+    /// (see [`Self::in_flight_cap`]'s doc comment and D-3 rule 4).
+    ///
+    /// Pipelining is what the lane earns, not what it starts with: a cold
+    /// lane has measured nothing, and eight queued updates on a link that
+    /// eats a tenth of them are eight partial deliveries the repair ladder
+    /// must drain.
+    fn effective_in_flight_cap(&self) -> usize {
+        if self.pipelining_earned {
+            self.config.in_flight_cap
+        } else {
+            self.config.in_flight_cap.min(2)
+        }
     }
 
     fn enqueue_simple(
@@ -2288,8 +2337,8 @@ impl MediaSenderMachine {
         // sender produced, and a sender that produces nothing measures a link
         // that carries nothing (MLP spec §6.2.4).
         let estimate = match self.plan_demand_bps() {
-            Some(demand_bps) => self.estimator.estimate_with_pace_floor(demand_bps),
-            None => self.estimator.estimate(),
+            Some(demand_bps) => self.estimator.estimate_with_pace_floor_at(demand_bps, now),
+            None => self.estimator.estimate_at(now),
         };
         // A cap that dropped leaves the queue holding objects the sender may
         // no longer put on the wire: the estimate's cap is the sender's own
@@ -2299,6 +2348,21 @@ impl MediaSenderMachine {
         // repair plan covers them (MLP spec §6.2.8).
         self.drop_oversized_objects(estimate.max_object_bytes as usize);
         self.last_estimate = estimate;
+        // Pipelining is earned over time, not granted by one window: a lane
+        // whose *filled* windows stay under 1 % loss for three consecutive
+        // report intervals has proved itself, and any other window — lossy,
+        // or quiet (a quiet lane has measured nothing) — revokes it at once
+        // (see `effective_in_flight_cap`). A quiet lane reading "no loss"
+        // because it sent nothing is the loophole a 35 %-loss lane waits
+        // for.
+        if estimate.loss_ratio < 0.01 && self.estimator.last_window_capacity_limited() {
+            self.healthy_since.get_or_insert(now);
+        } else {
+            self.healthy_since = None;
+        }
+        self.pipelining_earned = self.healthy_since.is_some_and(|since| {
+            now.saturating_duration_since(since) >= 3 * self.estimator.report_interval()
+        });
         #[cfg(feature = "pacing")]
         {
             self.pacer
@@ -2435,11 +2499,8 @@ mod tests {
         // measures a link that carries nothing.
         let now = Instant::now();
         let grid = CellGrid::with_cell_size(1920, 1080, 16);
-        let mut sender = MediaSenderMachine::new(
-            MediaSenderConfig::new(Carrier::Ws, grid),
-            grid,
-            now,
-        );
+        let mut sender =
+            MediaSenderMachine::new(MediaSenderConfig::new(Carrier::Ws, grid), grid, now);
         let idle_pace = sender.estimate().pace_bps;
         assert!(
             sender.plan_demand_bps().is_none(),
@@ -2597,6 +2658,8 @@ mod tests {
     fn in_flight_cap_bounds_the_write_queue() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
+        // A cold lane has earned nothing: the write queue holds the
+        // conservative pair (one being sent + one replacement).
         for index in 0..2u32 {
             let outcome =
                 sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![index]), now);
@@ -2610,7 +2673,7 @@ mod tests {
         // arrive for the encoder to continue (delivery is the accounting's
         // job, not a throughput gate).
         assert!(sender.poll_fragment(now).is_some());
-        assert!(sender.in_flight() <= 1);
+        assert_eq!(sender.in_flight(), 1, "one single-fragment object left");
         let accepted = sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![6]), now);
         assert!(matches!(accepted, EnqueueOutcome::Accepted { .. }));
     }
@@ -2622,7 +2685,7 @@ mod tests {
     fn the_echo_carrier_is_not_lost_behind_the_bulk_and_goes_first() {
         let now = Instant::now();
         let mut sender = sender(Carrier::Ws);
-        // The bulk fills the write queue.
+        // The bulk fills the write queue (a cold lane's conservative pair).
         for index in 0..2u32 {
             let outcome =
                 sender.enqueue_update(UpdateRequest::delta(vec![1, 2, 3], vec![index]), now);
