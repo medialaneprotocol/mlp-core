@@ -2385,6 +2385,7 @@ impl StateMachine for MediaSenderMachine {
 }
 
 /// Input tokens the driver must release when a resume says so.
+#[cfg(all(feature = "input", feature = "resume"))]
 pub fn release_tokens(actions: &[super::resume::ResumeAction]) -> Vec<InputToken> {
     actions
         .iter()
@@ -2885,6 +2886,7 @@ mod tests {
         assert!(transmit.is_some());
     }
 
+    #[cfg(all(feature = "input", feature = "resume"))]
     #[test]
     fn release_tokens_helper_extracts_releases() {
         use super::super::resume::ResumeAction;
