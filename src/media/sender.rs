@@ -269,6 +269,18 @@ impl MediaSenderConfig {
         self
     }
 
+    /// Set max parts stream (default from scheduler).
+    pub fn with_max_parts_stream(mut self, v: u16) -> Self {
+        self.scheduler.max_parts_stream = v;
+        self
+    }
+
+    /// Set max parts datagram (default from scheduler).
+    pub fn with_max_parts_datagram(mut self, v: u16) -> Self {
+        self.scheduler.max_parts_datagram = v;
+        self
+    }
+
     /// A configuration for a carrier and geometry.
     pub fn new(carrier: Carrier, grid: CellGrid) -> Self {
         let accounting = CellAccountingConfig {
