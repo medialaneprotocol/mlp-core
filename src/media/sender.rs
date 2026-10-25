@@ -145,6 +145,8 @@ pub struct SenderStats {
     pub in_flight_evictions_total: u64,
     /// Echo-critical duplicates scheduled.
     pub duplicates_scheduled: u64,
+    /// Parity objects the FEC rule attached to multi-part updates.
+    pub fec_parity_sent_total: u64,
     /// Update kinds, indexed `delta, anchor, idle, pulse, repair`.
     pub updates_by_kind: [u64; 5],
     /// Acks applied.
@@ -212,6 +214,13 @@ pub struct MediaSenderConfig {
     /// Fast path: skip the in-flight cap when the link is clean (loss < 1%),
     /// trading reliability for latency on good links.
     pub fast_path: bool,
+    /// Forward error correction: while the measured loss is at or above
+    /// [`FEC_LOSS_RATIO`](crate::media::fec::FEC_LOSS_RATIO), a multi-part
+    /// update leaves together with one XOR parity object, so the loss of a
+    /// single part costs no round trip (MLP spec §6.9). A single-part
+    /// update needs no parity: its parity would be the deliberate
+    /// duplicate the echo-critical rule already sends.
+    pub fec: bool,
     /// The estimator policy.
     pub bwe: BweConfig,
     /// Plan policy.
@@ -226,6 +235,12 @@ impl MediaSenderConfig {
     /// Enable the fast path: skip the in-flight cap on clean links.
     pub fn with_fast_path(mut self) -> Self {
         self.fast_path = true;
+        self
+    }
+
+    /// Turn the wire parity off (it is on by default).
+    pub fn without_fec(mut self) -> Self {
+        self.fec = false;
         self
     }
 
@@ -306,6 +321,7 @@ impl MediaSenderConfig {
             duplicate_loss_ratio: 0.03,
             idle_updates: true,
             fast_path: false,
+            fec: true,
             bwe: BweConfig::default(),
             plan: PlanConfig {
                 anchor_threshold: (grid.cells() / 4).max(16),
@@ -1144,6 +1160,50 @@ impl MediaSenderMachine {
             }
         }
         let _ = first_object_id;
+        // The terrible-lane rule (MLP spec §6.9): while the link measures at
+        // or above the loss threshold, a multi-part update leaves together
+        // with one parity object, so a single lost part is recovered on
+        // arrival — no round trip, no repair plan.
+        if self.config.fec
+            && part_count >= 2
+            && self.last_estimate.loss_ratio >= super::fec::FEC_LOSS_RATIO
+        {
+            let parity_payload = super::fec::group_parity(&update.parts);
+            let meta = UpdateMeta {
+                update_id,
+                update_base,
+                part_index: 0,
+                part_count,
+                update_bytes: update.update_bytes,
+                chain_epoch: self.accounting.epoch(),
+                reflects_input_seq: update.reflects_input_seq,
+                stream_id: update.stream_id,
+                path_id: update.path_id,
+                send_epoch_ms: session_ms,
+            };
+            let priority =
+                Priority::new(update.kind.mlp_priority_hint()).unwrap_or(Priority::MEDIA);
+            let ext = super::fec::parity_ext(&meta, part_count, self.accounting.grid().cells());
+            let object_id = self.alloc_object_id();
+            self.objects.push(OutboundObject {
+                object_id,
+                class: FragmentClass::Media,
+                traffic: TrafficClass::Media,
+                priority,
+                flags: FragmentFlags::FIN,
+                ext,
+                payload: parity_payload,
+                next_fragment: 0,
+                fragment_count: 1,
+                update_id: None,
+                cells: Vec::new(),
+                enqueued_at: now,
+                deadline_epoch_ms: None,
+                echo_critical: false,
+                duplicated: false,
+            });
+            self.stats.fec_parity_sent_total += 1;
+        }
         self.next_update_id = self.next_update_id.wrapping_add(1).max(1);
         self.last_emitted_update_id = update_id;
         self.accounting

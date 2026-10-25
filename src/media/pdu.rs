@@ -84,6 +84,11 @@ pub mod tlv {
 
     /// `u32` — the media stream this update belongs to (0 = default stream).
     pub const STREAM_ID: u8 = 0x10;
+    /// `u64` — the update id whose parts the parity object protects (MLP
+    /// spec §6.9). Its presence is what makes an object a parity object.
+    pub const FEC_GROUP_ID: u8 = 0x11;
+    /// `u16` — how many parts the protected group holds (MLP spec §6.9).
+    pub const FEC_K: u8 = 0x12;
     /// `u8` — the path this fragment was sent over (0 = default path).
     pub const PATH_ID: u8 = 0x13;
 
@@ -591,7 +596,7 @@ impl HeaderExt {
             .count()
     }
 
-    fn get_u64(&self, kind: u8) -> Option<u64> {
+    pub fn get_u64(&self, kind: u8) -> Option<u64> {
         let value = self.get(kind)?;
         if value.len() != 8 {
             return None;
@@ -601,7 +606,7 @@ impl HeaderExt {
         Some(u64::from_le_bytes(bytes))
     }
 
-    fn get_u32(&self, kind: u8) -> Option<u32> {
+    pub fn get_u32(&self, kind: u8) -> Option<u32> {
         let value = self.get(kind)?;
         if value.len() != 4 {
             return None;
@@ -611,7 +616,7 @@ impl HeaderExt {
         Some(u32::from_le_bytes(bytes))
     }
 
-    fn get_u16(&self, kind: u8) -> Option<u16> {
+    pub fn get_u16(&self, kind: u8) -> Option<u16> {
         let value = self.get(kind)?;
         if value.len() != 2 {
             return None;
@@ -620,7 +625,7 @@ impl HeaderExt {
         bytes.copy_from_slice(value);
         Some(u16::from_le_bytes(bytes))
     }
-    fn get_u8(&self, kind: u8) -> Option<u8> {
+    pub fn get_u8(&self, kind: u8) -> Option<u8> {
         let value = self.get(kind)?;
         if value.len() != 1 {
             return None;

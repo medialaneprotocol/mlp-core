@@ -22,6 +22,7 @@
 pub mod bwe;
 pub mod cells;
 pub mod error;
+pub mod fec;
 pub mod flow;
 pub mod input;
 pub mod lifecycle;
@@ -43,6 +44,10 @@ pub mod ticket;
 
 pub use bwe::{BandwidthEstimator, BweConfig, BweMode, Estimate, PriorStore, ProbeRequest};
 pub use error::{MediaErrorCode, RejectReason};
+pub use fec::{
+    FEC_LOSS_RATIO, FEC_MAX_K, build_parity_fragment, crc32, group_parity, parity_ext,
+    parity_group, recover_part,
+};
 pub use flow::{ConnectionFlowControl, FlowControl, StreamFlowControl};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
 pub use loss::LossDetector;

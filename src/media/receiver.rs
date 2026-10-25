@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::RejectReason;
 use super::object::{AssemblyConfig, AssemblyOutcome, MediaObject, ObjectAssembler};
-use super::pdu::{Carrier, FragmentClass, FragmentFlags};
+use super::pdu::{Carrier, FragmentClass, FragmentFlags, HeaderExt, Priority, UpdateMeta};
 use super::{MediaAck, MediaFeedback, MediaPath, MediaProbe, ProbeEcho};
 
 /// Default report cadence floor (`clamp(4 × rtt_min, 250, 2 000)`).
@@ -110,6 +110,10 @@ pub enum MediaReceiveEvent {
     /// Either the idle cadence elapsed, or a fact the sender cannot wait for
     /// is waiting — an input echo or a loss attribution (MLP spec §6.2.1).
     FeedbackDue,
+    /// A part lost on the wire came back from the group's parity (MLP
+    /// spec §6.9): no round trip, no repair request. The object is the
+    /// recovered part, byte for byte what the sender sent.
+    ParityRecovered(MediaObject),
     /// Answer the peer's probe with this echo.
     ProbeEchoDue(ProbeEcho),
     /// Send our own probe to measure RTT.
@@ -135,6 +139,8 @@ pub struct ReceiverStats {
     pub duplicate_fragments: u64,
     /// Duplicate objects observed (`DUP` flag).
     pub duplicate_objects: u64,
+    /// Parts recovered from the wire parity (MLP spec §6.9).
+    pub parity_recovered_total: u64,
     /// Media updates that arrived out of order (the update-id space).
     pub reordered_objects: u64,
     /// Gaps in the **update-id** space observed (the receiver's loss signal).
@@ -232,12 +238,15 @@ pub struct MediaReceiverMachine {
     path_switches: u64,
     active_path: MediaPath,
     app_version: String,
+    /// The wire parity's receiver half (MLP spec §6.9).
+    fec: FecTracker,
 }
 
 impl MediaReceiverMachine {
     /// Create a receiver.
     pub fn new(config: MediaReceiverConfig, now: Instant) -> Self {
         Self {
+            fec: FecTracker::new(),
             assembler: ObjectAssembler::new(config.assembly),
             config,
             started: now,
@@ -435,6 +444,23 @@ impl MediaReceiverMachine {
                 // The object is not whole yet: nothing is accounted for it.
                 AssemblyOutcome::Pending => {}
                 AssemblyOutcome::Object(object) => {
+                    // A parity object is not an applicable object: it names a
+                    // group instead of an update, and its payload is the
+                    // group's XOR (MLP spec §6.9). It feeds the tracker and
+                    // never reaches the driver.
+                    if let Some((group_id, k)) = super::fec::parity_group(&object.ext) {
+                        if let Some(recovered) = self.fec.on_parity(
+                            group_id,
+                            k,
+                            &object.payload,
+                            object.ext.clone(),
+                            now,
+                        ) {
+                            self.count_recovered(&recovered);
+                            events.push(MediaReceiveEvent::ParityRecovered(recovered));
+                        }
+                        continue;
+                    }
                     // The loss accounting is made in the update-id space (MLP
                     // spec §5.2), and a media update is accounted when the
                     // object that carries it is whole: an update the receiver
@@ -452,6 +478,19 @@ impl MediaReceiverMachine {
                     if object.is_duplicate() {
                         self.stats.duplicate_objects += 1;
                         self.window_duplicates += 1;
+                    }
+                    // The parity's chance to answer before the repair ladder:
+                    // a part that just arrived may be the k-1'th of its group
+                    // (MLP spec §6.9).
+                    if let Some(meta) = object.update_meta()
+                        && meta.part_count >= 2
+                        && meta.update_id >= 1
+                        && let Some(recovered) =
+                            self.fec
+                                .on_part(&meta, &object.payload, object.ext.clone(), now)
+                    {
+                        self.count_recovered(&recovered);
+                        events.push(MediaReceiveEvent::ParityRecovered(recovered));
                     }
                     if object.flags.contains(FragmentFlags::ECHO_REQUESTED) {
                         let echo = ProbeEcho {
@@ -849,12 +888,153 @@ impl MediaReceiverMachine {
         }
     }
 
+    /// Account a parity-recovered part the way a wire part is accounted
+    /// (MLP spec §6.9): same bytes, same update-id space, same windows.
+    fn count_recovered(&mut self, object: &MediaObject) {
+        self.stats.parity_recovered_total += 1;
+        self.stats.bytes += object.payload.len() as u64;
+        self.window_bytes += object.payload.len() as u64;
+        self.stats.objects_by_class[class_slot(object.class)] += 1;
+        self.window_objects += 1;
+        self.note_media_update(protocol_update_id(object));
+    }
+
     fn probe_payload_bytes(&self) -> u32 {
         // A quarter-second of the sender's advertised pace, never cells.
         match self.advertised_pace_bps {
             Some(pace) => ((pace / 8 / 4) as u32).clamp(1, self.config.probe_payload_max),
             None => 256.min(self.config.probe_payload_max),
         }
+    }
+}
+
+/// The receiver's half of the wire parity (MLP spec §6.9).
+///
+/// The parts of a multi-part update are held by index alongside the
+/// group's parity object when it arrived. The moment the group holds
+/// `k - 1` of `k` parts and the parity, the missing part is recovered on
+/// the spot — no round trip, no repair request. A parity that fails the
+/// group's CRC proves nothing and is dropped: the recovery path never
+/// yields wrong bytes, and the repair ladder answers instead.
+#[derive(Debug, Clone)]
+struct FecTracker {
+    groups: Vec<FecGroup>,
+}
+
+/// One tracked group.
+#[derive(Debug, Clone)]
+struct FecGroup {
+    update_id: u64,
+    part_count: u16,
+    held: Vec<Option<Vec<u8>>>,
+    parity: Option<Vec<u8>>,
+    /// The parity object's extension: everything a recovered part's own
+    /// metadata needs, minus the part slot (which recovery fills in).
+    template: HeaderExt,
+}
+
+/// How many groups the tracker holds: the sender's write queue bound. A
+/// group older than the newest eight is a group the repair ladder owns.
+const FEC_TRACKER_CAPACITY: usize = 8;
+
+impl FecTracker {
+    fn new() -> Self {
+        Self { groups: Vec::new() }
+    }
+
+    fn group(&mut self, update_id: u64, part_count: u16, template: HeaderExt) -> &mut FecGroup {
+        if let Some(index) = self
+            .groups
+            .iter()
+            .position(|group| group.update_id == update_id)
+        {
+            return &mut self.groups[index];
+        }
+        if self.groups.len() >= FEC_TRACKER_CAPACITY {
+            self.groups.remove(0);
+        }
+        self.groups.push(FecGroup {
+            update_id,
+            part_count,
+            held: vec![None; part_count as usize],
+            parity: None,
+            template,
+        });
+        self.groups.last_mut().expect("just pushed")
+    }
+
+    /// A part arrived: hold it, and if the group is now whole, forget it
+    /// (nothing to recover). Returns the recovery, if one just completed.
+    fn on_part(
+        &mut self,
+        meta: &UpdateMeta,
+        payload: &[u8],
+        template: HeaderExt,
+        now: Instant,
+    ) -> Option<MediaObject> {
+        let group = self.group(meta.update_id, meta.part_count, template);
+        group.held[meta.part_index as usize] = Some(payload.to_vec());
+        let complete = group.held.iter().all(Option::is_some);
+        if complete {
+            // The parts all arrived: the parity has nothing to do.
+            self.groups
+                .retain(|candidate| candidate.update_id != meta.update_id);
+            return None;
+        }
+        self.recover(meta.update_id, now)
+    }
+
+    /// The parity object arrived: hold it and try the recovery.
+    fn on_parity(
+        &mut self,
+        update_id: u64,
+        part_count: u16,
+        payload: &[u8],
+        template: HeaderExt,
+        now: Instant,
+    ) -> Option<MediaObject> {
+        let group = self.group(update_id, part_count, template);
+        group.parity = Some(payload.to_vec());
+        self.recover(update_id, now)
+    }
+
+    fn recover(&mut self, update_id: u64, now: Instant) -> Option<MediaObject> {
+        let index = self
+            .groups
+            .iter()
+            .position(|group| group.update_id == update_id)?;
+        let group = &self.groups[index];
+        let parity = group.parity.as_ref()?;
+        let held: Vec<(u16, Vec<u8>)> = group
+            .held
+            .iter()
+            .enumerate()
+            .filter_map(|(part, bytes)| bytes.as_ref().map(|bytes| (part as u16, bytes.clone())))
+            .collect();
+        let Some((part_index, payload)) =
+            super::fec::recover_part(parity, &held, group.part_count as usize)
+        else {
+            // A parity that does not check out is a parity that proves
+            // nothing: the repair ladder owns this group.
+            return None;
+        };
+        // The recovered part is indistinguishable from a wire one: the
+        // template's metadata plus the part slot recovery just filled.
+        let mut ext = group.template.clone();
+        let _ = ext.push_u64(super::pdu::tlv::UPDATE_ID, update_id);
+        let _ = ext.push_u16_pair(super::pdu::tlv::PART, part_index, group.part_count);
+        let object = MediaObject {
+            class: FragmentClass::Media,
+            flags: FragmentFlags::FIN,
+            priority: Priority::MEDIA,
+            object_id: u32::MAX,
+            ext,
+            payload,
+            first_seen: now,
+            completed_at: now,
+        };
+        self.groups.remove(index);
+        Some(object)
     }
 }
 
