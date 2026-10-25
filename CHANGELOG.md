@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+- **Forward error correction on the wire (spec §6.9).** While the freshest
+  loss picture sits in the 2–15 % band — the closed window's measurement,
+  with the prompt attributions (§6.2.1) folded in as they arrive — a
+  multi-part update leaves together with one XOR parity object: each part
+  rides as a length-prefixed block, the parity is the blocks' XOR plus the
+  group's CRC-32, and a receiver holding k−1 of k parts rebuilds the
+  missing one on arrival and proves it against the CRC — no round trip, no
+  repair plan. A parity that lies fails the proof, recovers nothing, is
+  counted (`parity_rejected_total`), and the repair ladder answers. A
+  single-part update takes no parity: its parity is the deliberate
+  duplicate the echo-critical rule already sends. Above 15 % two losses in
+  one group are common enough that the parity answers nothing while
+  doubling the bytes a deep-loss lane cannot afford; there the repair
+  ladder and its anchors are the honest tool.
+
 ### Removed
 - **The `fec` feature and the `media::fec` module.** The XOR-parity helper
   was never wired to a sender or a receiver, referenced a spec section that

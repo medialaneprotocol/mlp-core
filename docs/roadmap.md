@@ -35,7 +35,7 @@
 - [ ] BBR-style congestion control
 - [ ] Session key rotation
 - [ ] Multipath load balancing
-- [ ] Forward error correction (XOR parity on the wire, with a spec section)
+- [x] Forward error correction (XOR parity on the wire, spec §6.9)
 
 ## v1.0 (target)
 - [ ] RFC published

@@ -27,11 +27,15 @@ use super::pdu::{Fragment, FragmentClass, FragmentFlags, HeaderExt, Priority, Up
 /// one update's parts, and the wire caps parts at eight.
 pub const FEC_MAX_K: usize = 8;
 
-/// The measured loss ratio at which the sender attaches parity to every
-/// multi-part update (MLP spec §6.9): below it a round of repair is
-/// cheaper than the parity bytes; at and above it, one lost part in the
-/// group is recovered for free.
+/// The measured loss band where the sender attaches parity to every
+/// multi-part update (MLP spec §6.9). Below `FEC_LOSS_RATIO` a round of
+/// repair is cheaper than the parity bytes; above `FEC_LOSS_RATIO_MAX` two
+/// losses in one group are common enough that XOR parity answers nothing
+/// while doubling the bytes a deep-loss lane cannot afford — there the
+/// repair ladder and its anchors are the honest tool. The band is where
+/// one lost part per group is the common case and is recovered for free.
 pub const FEC_LOSS_RATIO: f64 = 0.02;
+pub const FEC_LOSS_RATIO_MAX: f64 = 0.15;
 
 /// CRC-32 (IEEE 802.3), table-free: the polynomial walks a byte at a time.
 pub fn crc32(bytes: &[u8]) -> u32 {

@@ -59,6 +59,8 @@ Sequence of (kind: u8, length: u8, value: length bytes). The registry
 | `0x0E` | `CELL_COUNT` | u32 — the sender's cell grid size |
 | `0x0F` | `COST_MS` | u16 — measured processing cost reported by a hop |
 | `0x10` | `STREAM_ID` | u32 — media stream (0 = default) |
+| `0x11` | `FEC_GROUP_ID` | u64 — the update id whose parts this parity object protects (§6.9) |
+| `0x12` | `FEC_K` | u16 — the protected group's part count (2..=8) |
 | `0x13` | `PATH_ID` | u8 — the path this fragment was sent over |
 | `0x7F` | `GREASE` | greasing; receivers must exercise their skip path |
 

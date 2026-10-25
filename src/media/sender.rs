@@ -818,6 +818,11 @@ pub struct MediaSenderMachine {
     pending_echoes: Vec<u64>,
     pending_plan_reasons: Vec<PlanStartReason>,
     last_estimate: Estimate,
+    /// The loss ratio the terrible-lane rule reads (MLP spec §6.9): the
+    /// closed-window measurement, and the prompt attributions folded in as
+    /// they arrive. The estimate's own ratio stays the window's
+    /// measurement; this one is the sender's freshest loss picture.
+    fec_loss_ratio: f64,
     /// Whether the lane has earned write-queue pipelining (three consecutive
     /// report intervals under 1 % loss; see `effective_in_flight_cap`).
     pipelining_earned: bool,
@@ -863,6 +868,7 @@ impl MediaSenderMachine {
             pending_echoes: Vec::new(),
             pending_plan_reasons: Vec::new(),
             last_estimate: estimate,
+            fec_loss_ratio: estimate.loss_ratio,
             pipelining_earned: false,
             healthy_since: None,
             policy: MediaLanePolicy::default(),
@@ -1166,7 +1172,8 @@ impl MediaSenderMachine {
         // arrival — no round trip, no repair plan.
         if self.config.fec
             && part_count >= 2
-            && self.last_estimate.loss_ratio >= super::fec::FEC_LOSS_RATIO
+            && self.fec_loss_ratio >= super::fec::FEC_LOSS_RATIO
+            && self.fec_loss_ratio < super::fec::FEC_LOSS_RATIO_MAX
         {
             let parity_payload = super::fec::group_parity(&update.parts);
             let meta = UpdateMeta {
@@ -1508,12 +1515,26 @@ impl MediaSenderMachine {
         // ratio, and a multi-part group offered into a lane the receiver
         // says is losing it deserves its parity now, not at the next
         // window's close.
+        // A prompt's loss attribution is the fact the sender cannot wait
+        // for (MLP spec §6.2.1): the estimator's goodput filters take only
+        // closed windows, but the terrible-lane rule (§6.9) reads the
+        // freshest loss picture, and a multi-part group offered into a
+        // lane the receiver says is losing it deserves its parity now,
+        // not at the next window's close. The attribution is smoothed
+        // inside the estimator, and it feeds this ratio alone — the
+        // estimate's own ratio stays the closed window's measurement.
         if feedback.window_ms == 0 {
             self.estimator
                 .on_prompt_loss(feedback.lost_objects, feedback.received_objects);
         }
         self.estimator.on_feedback(&feedback, now);
         self.refresh_estimate(now);
+        // The freshest loss picture, after the refresh: a closed window's
+        // measurement, or the prompt attributions folded over it.
+        self.fec_loss_ratio = match self.estimator.prompt_loss_ratio() {
+            Some(prompt) => prompt.max(self.last_estimate.loss_ratio),
+            None => self.last_estimate.loss_ratio,
+        };
         events.extend(self.poll_plans(now));
         events
     }

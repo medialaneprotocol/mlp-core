@@ -334,6 +334,7 @@ pub struct BandwidthEstimator {
     last_evidence_at: Option<Instant>,
     no_feedback: bool,
     loss_ratio: f64,
+    prompt_loss_ratio: Option<f64>,
     goodput_bps: f64,
     queue_delay_ms: f64,
     demand_bps: f64,
@@ -392,6 +393,7 @@ impl BandwidthEstimator {
             last_evidence_at: None,
             no_feedback: false,
             loss_ratio: 0.0,
+            prompt_loss_ratio: None,
             goodput_bps: 0.0,
             queue_delay_ms: 0.0,
             demand_bps: 0.0,
@@ -459,18 +461,33 @@ impl BandwidthEstimator {
     /// into a lane the receiver says is losing them (MLP spec §6.2.1, §6.9).
     /// The attribution is advisory — it does not move the goodput filters —
     /// it only raises the loss ratio the estimate carries.
+    pub fn prompt_loss_ratio(&self) -> Option<f64> {
+        self.prompt_loss_ratio
+    }
+
+    /// Note a loss attribution that could not wait for the window's close:
+    /// a prompt's `lost_objects` is the receiver naming updates it never
+    /// saw (MLP spec §6.2.1). It is read, not applied: the goodput
+    /// filters and the estimate carry the closed window's measurement
+    /// alone. The sender folds it into its own freshest loss picture.
     pub fn on_prompt_loss(&mut self, lost_objects: u64, received_objects: u64) {
         if lost_objects == 0 {
+            self.prompt_loss_ratio = None;
             return;
         }
         let attempted = lost_objects + received_objects;
         if attempted == 0 {
             return;
         }
-        let prompt_ratio = lost_objects as f64 / attempted as f64;
-        if prompt_ratio > self.loss_ratio {
-            self.loss_ratio = prompt_ratio;
-        }
+        let sample = lost_objects as f64 / attempted as f64;
+        self.prompt_loss_ratio = Some(match self.prompt_loss_ratio {
+            // A prompt's sample is small, so it nudges instead of setting:
+            // the same smoothing every other measurement in this estimator
+            // takes. A lane the receiver keeps naming as lossy still climbs
+            // to its real ratio within a few prompts.
+            Some(previous) => previous + 0.25 * (sample - previous),
+            None => sample,
+        });
     }
 
     /// The last receiver-reported loss ratio.
