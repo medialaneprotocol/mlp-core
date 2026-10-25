@@ -1,7 +1,7 @@
 # Error Code Registry (MLP)
 
-Adapted from QUIC's error code registry (RFC 9000 §20.1). MLP uses a
-single byte error code on the wire (`RejectReason` / `MediaErrorCode`).
+Adapted from the QUIC error code registry (RFC 9000, its section 20.1).
+MLP uses a single byte error code on the wire (`RejectReason` / `MediaErrorCode`).
 
 ## RejectReason (protocol-level)
 

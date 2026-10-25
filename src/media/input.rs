@@ -1102,16 +1102,15 @@ impl HostInputState {
             return;
         }
         // The worker is full: pointer moves coalesce, everything else is kept.
-        if envelope.kind == InputKind::PointerMove {
-            if let Some(slot) = self
+        if envelope.kind == InputKind::PointerMove
+            && let Some(slot) = self
                 .worker
                 .iter()
                 .position(|queued| queued.kind == InputKind::PointerMove)
-            {
-                self.worker[slot] = envelope.clone();
-                self.coalesced += 1;
-                return;
-            }
+        {
+            self.worker[slot] = envelope.clone();
+            self.coalesced += 1;
+            return;
         }
         if envelope.is_critical() {
             // Never drop a release: make room by coalescing the oldest move.

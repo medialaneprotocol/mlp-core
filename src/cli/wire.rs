@@ -31,13 +31,15 @@ pub fn parse_hex(text: &str) -> Result<Vec<u8>, CliError> {
             }
         }
     }
-    if nibbles.len() % 2 != 0 {
+    if !nibbles.len().is_multiple_of(2) {
         return Err(CliError::Input(
             "the hex text holds an odd number of digits".to_string(),
         ));
     }
     Ok(nibbles
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (pair[0] << 4) | pair[1])
         .collect())
 }
@@ -69,10 +71,10 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     }
     message.extend_from_slice(&bit_length.to_be_bytes());
 
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let mut schedule = [0_u32; 64];
-        for (index, word) in block.chunks_exact(4).enumerate() {
-            schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (index, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            schedule[index] = u32::from_be_bytes(*word);
         }
         for index in 16..64 {
             let s0 = schedule[index - 15].rotate_right(7)

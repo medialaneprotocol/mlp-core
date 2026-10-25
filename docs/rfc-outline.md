@@ -47,16 +47,16 @@ RFC conventions.
 ## 10. Stream Multiplexing
 - stream_id TLV, per-stream state.
 
-## 12. 0-RTT Resumption
+## 11. 0-RTT Resumption
 - Session tickets, early data, anti-replay.
 
-## 13. Security Considerations
+## 12. Security Considerations
 - See docs/security.md.
 
-## 14. IANA Considerations
+## 13. IANA Considerations
 - See docs/iana.md.
 
-## 15. References
+## 14. References
 - Normative and informative.
 
 ## Appendices
