@@ -1502,6 +1502,16 @@ impl MediaSenderMachine {
         for echo in &feedback.probes {
             events.extend(self.on_probe_echo(*echo, now));
         }
+        // A prompt's loss attribution is the fact the sender cannot wait
+        // for (MLP spec §6.2.1): the estimator's goodput filters take only
+        // closed windows, but the terrible-lane rule (§6.9) reads the loss
+        // ratio, and a multi-part group offered into a lane the receiver
+        // says is losing it deserves its parity now, not at the next
+        // window's close.
+        if feedback.window_ms == 0 {
+            self.estimator
+                .on_prompt_loss(feedback.lost_objects, feedback.received_objects);
+        }
         self.estimator.on_feedback(&feedback, now);
         self.refresh_estimate(now);
         events.extend(self.poll_plans(now));

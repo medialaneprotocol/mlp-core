@@ -453,6 +453,26 @@ impl BandwidthEstimator {
         self.pace_bps.round() as u64
     }
 
+    /// Note a loss attribution that could not wait for the window's close:
+    /// a prompt's `lost_objects` is the receiver naming updates it never
+    /// saw, and a sender that ignores it keeps offering multi-part groups
+    /// into a lane the receiver says is losing them (MLP spec §6.2.1, §6.9).
+    /// The attribution is advisory — it does not move the goodput filters —
+    /// it only raises the loss ratio the estimate carries.
+    pub fn on_prompt_loss(&mut self, lost_objects: u64, received_objects: u64) {
+        if lost_objects == 0 {
+            return;
+        }
+        let attempted = lost_objects + received_objects;
+        if attempted == 0 {
+            return;
+        }
+        let prompt_ratio = lost_objects as f64 / attempted as f64;
+        if prompt_ratio > self.loss_ratio {
+            self.loss_ratio = prompt_ratio;
+        }
+    }
+
     /// The last receiver-reported loss ratio.
     pub fn loss_ratio(&self) -> f64 {
         self.loss_ratio
