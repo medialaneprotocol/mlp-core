@@ -2,26 +2,23 @@
 name = "mlp-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Reference implementation of the Media Lane Protocol (MLP) core: sans-IO fragment framing, object assembly, congestion control, scheduling, and session continuity."
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/medialaneprotocol/mlp-core"
 documentation = "https://docs.rs/mlp-core"
 readme = "README.md"
 keywords = ["media", "protocol", "transport", "realtime", "sans-io"]
-categories = ["network-programming", "no-std::no-alloc"]
+categories = ["network-programming"]
 publish = false
 
 [features]
-default = ["cli", "pacing", "bwe", "path-selection", "resume", "input", "fec"]
+default = ["cli", "pacing", "path-selection", "resume", "input"]
 # Core is always included. Extensions are optional.
 pacing = []
-bwe = []
 path-selection = []
 resume = []
 input = []
-# Forward error correction (XOR parity over fragment groups).
-fec = []
 cli = ["dep:serde_json"]
 
 [dependencies]

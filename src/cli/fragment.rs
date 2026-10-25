@@ -194,8 +194,6 @@ pub fn parse_class(name: &str) -> Result<FragmentClass, CliError> {
         "media" => Ok(FragmentClass::Media),
         "feedback" => Ok(FragmentClass::Feedback),
         "path" => Ok(FragmentClass::Path),
-        "datagram" => Ok(FragmentClass::Datagram),
-        "fec" => Ok(FragmentClass::Fec),
         other => Err(CliError::Usage(format!(
             "unknown class {other:?}; the classes are control, cursor, media, feedback and path"
         ))),
@@ -442,10 +440,9 @@ mod tests {
     #[test]
     fn a_class_name_names_a_class() {
         assert_eq!(parse_class("media").expect("class"), FragmentClass::Media);
-        assert_eq!(
-            parse_class("datagram").expect("class"),
-            FragmentClass::Datagram
-        );
+        // The wire reserves every class above PATH; the spellings are refused.
+        assert!(parse_class("datagram").is_err());
+        assert!(parse_class("fec").is_err());
         assert!(parse_class("nonsense").is_err());
     }
 

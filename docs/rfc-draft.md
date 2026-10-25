@@ -81,8 +81,8 @@ are skipped by length (forward compatibility).
 | 2 | MEDIA | Media updates (reliable, ordered) |
 | 3 | FEEDBACK | Acknowledgements, reports |
 | 4 | PATH | Path selection, migration |
-| 5 | DATAGRAM | Unreliable datagrams |
-| 6 | FEC | Forward error correction parity |
+
+Classes 5-255 are reserved (`BAD_CLASS`).
 
 ### 4.4 UpdateMeta
 
@@ -140,11 +140,7 @@ Gap-based (QUIC-style). Packet threshold: 3.
 
 Multiple paths, path selection, migration.
 
-### 6.12 Forward Error Correction
-
-XOR parity over fragment groups.
-
-### 6.13 0-RTT Resumption
+### 6.12 0-RTT Resumption
 
 Session tickets, early data, anti-replay.
 
@@ -289,8 +285,6 @@ See conformance/vectors.json for golden vectors.
 | 0x0E | CELL_COUNT | 4 | Grid cell count |
 | 0x0F | COST_MS | 2 | Processing cost |
 | 0x10 | STREAM_ID | 4 | Media stream id |
-| 0x11 | FEC_GROUP_ID | 4 | FEC group id |
-| 0x12 | FEC_K | 2 | Data fragments in FEC group |
 | 0x13 | PATH_ID | 1 | Path identifier |
 | 0x7F | GREASE | variable | Greasing TLV |
 | 0x10-0xEF | Reserved | variable | Standard assignments |

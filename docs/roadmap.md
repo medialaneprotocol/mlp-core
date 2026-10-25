@@ -14,10 +14,9 @@
 - [x] Loss detection (QUIC-style)
 - [x] Multipath and path probing
 - [x] Stream multiplexing
-- [x] Forward error correction (XOR)
 - [x] 0-RTT session resumption
 - [x] Connection migration
-- [x] cfg-гейты (pacing, path-selection, resume)
+- [x] cfg-гейты (pacing, path-selection, resume, input)
 - [x] Prometheus metrics
 - [x] Conformance vectors
 - [x] Reference implementations (Go, Python, C)
@@ -36,6 +35,7 @@
 - [ ] BBR-style congestion control
 - [ ] Session key rotation
 - [ ] Multipath load balancing
+- [ ] Forward error correction (XOR parity on the wire, with a spec section)
 
 ## v1.0 (target)
 - [ ] RFC published

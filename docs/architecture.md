@@ -6,7 +6,7 @@
 - `src/action.rs` — Action, ConnectionEvent, Receive, Transmit.
 - `src/state_machine.rs` — SessionPhase, StateMachine.
 - `src/media/` — media lane core.
-  - `pdu.rs` — fragment header, TLV registry, validation.
+  - `pdu.rs` — fragment header, TLV registry, carriers, validation.
   - `object.rs` — assembly, dedup, open-object table.
   - `sender.rs` — MediaSenderMachine.
   - `receiver.rs` — MediaReceiverMachine.
@@ -17,6 +17,13 @@
   - `resume.rs` — parking, resume, reconnect ladder.
   - `input.rs` — input path.
   - `lifecycle.rs` — lane state vocabulary.
+  - `flow.rs` — per-stream and connection flow control.
+  - `loss.rs` — QUIC-style loss detection.
+  - `migration.rs` — connection migration challenges.
+  - `probe.rs` — path probe objects.
+  - `qos.rs` — traffic-class to DSCP mapping.
+  - `ticket.rs` — 0-RTT session tickets.
+  - `metrics.rs` — Prometheus telemetry counters.
   - `error.rs` — rejection vocabulary.
 - `src/cli/` — command-line tool (behind `cli` feature).
 
@@ -28,8 +35,11 @@ No sockets, no clocks, no runtime allocations. Time arrives as
 ## Feature gates
 
 - `cli` — command-line tool.
-- `pacing` — token-bucket pacer (optional).
-- `bwe` — bandwidth estimator (core).
-- `path-selection` — path selector (optional).
-- `resume` — session resume (optional).
-- `input` — input path (core).
+- `pacing` — token-bucket pacer.
+- `path-selection` — path selector.
+- `resume` — session resume machinery.
+- `input` — the input path's sender-side integration.
+
+The estimator, the scheduler, the cell accounting, the receiver and the input
+machines themselves are core code and are always compiled in.
+`cargo build --no-default-features` builds the core without any of the five.

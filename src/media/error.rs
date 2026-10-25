@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub enum MediaErrorCode {
     /// The transport message did not start with `MLP` (MLP spec §6.2).
     BadMagic = 1,
-    /// `version` was not `2`.
+    /// `version` was not `1`.
     UnsupportedVersion = 2,
     /// `class` was outside `0..=4`.
     BadClass = 3,

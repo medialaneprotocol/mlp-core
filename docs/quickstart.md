@@ -26,7 +26,7 @@ let sender = MediaSenderMachine::new(
 
 ```sh
 # Core only (no pacing, path-selection, resume)
-cargo build --no-default-features --features "cli bwe input"
+cargo build --no-default-features --features "cli input"
 
 # Everything
 cargo build

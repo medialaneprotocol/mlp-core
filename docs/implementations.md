@@ -9,10 +9,12 @@ interop test suite.
 | Implementation | Language | Wire format | Sender | Receiver | Scheduler | Status |
 |---|---|---|---|---|---|---|
 | mlp-core | Rust | full | full | full | full | reference |
+| mlp-ts | TypeScript | full (receiver side) | — | full | — | browser reference (receiver) |
+| mlp-server | Rust | via mlp-core | via mlp-core | via mlp-core | via mlp-core | reference WebSocket server |
 | mlp-harness | Rust | full | (driver) | (driver) | full | verification layer |
-| mlp-go | Go | partial | planned | planned | planned | in progress |
-| mlp-py | Python | partial | planned | planned | planned | in progress |
-| mlp-c | C | partial | planned | planned | planned | in progress |
+| mlp-go | Go | full | fragmenter | skeleton | skeleton | in progress |
+| mlp-py | Python | full | fragmenter | skeleton | skeleton | in progress |
+| mlp-c | C | full | fragment helper | — | — | in progress |
 
 ## Conformance levels
 
@@ -23,4 +25,6 @@ interop test suite.
 
 ## Interop
 
-See `scripts/interop.sh` for the automated wire-level conformance run.
+See `scripts/interop.sh` for the automated wire-level conformance run and
+`scripts/validate_all.sh` for the full matrix (Rust, TypeScript, Go, Python, C
+plus interop).

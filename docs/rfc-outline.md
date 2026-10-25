@@ -44,10 +44,7 @@ RFC conventions.
 ## 9. Multipath and Connection Migration
 - Path selection, path change, migration.
 
-## 10. Forward Error Correction
-- XOR parity over fragment groups.
-
-## 11. Stream Multiplexing
+## 10. Stream Multiplexing
 - stream_id TLV, per-stream state.
 
 ## 12. 0-RTT Resumption

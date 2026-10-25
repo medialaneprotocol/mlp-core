@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Full validation: Rust tests + all language implementations + interop.
+# The sibling repositories are resolved relative to this checkout; override
+# with WORK=... when they live elsewhere.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="${WORK:-/tmp/opencode/bench-work}"
+WORK="${WORK:-$(cd "$ROOT/.." && pwd)}"
 
 echo "=== Rust (mlp-core) ==="
 (cd "$ROOT" && cargo test)

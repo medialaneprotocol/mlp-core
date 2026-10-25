@@ -4,8 +4,8 @@
 //!
 //! | off | size | field |
 //! |---|---|---|
-//! | 0 | 4 | `magic` = `52 4D 4C 50` ("MLP") |
-//! | 4 | 1 | `version` = 2 |
+//! | 0 | 4 | `magic` = `4D 4C 50 00` ("MLP\0") |
+//! | 4 | 1 | `version` = 1 |
 //! | 5 | 1 | `class` (0=CONTROL, 1=CURSOR, 2=MEDIA, 3=FEEDBACK, 4=PATH) |
 //! | 6 | 1 | `flags` (bit 7 reserved, must be 0) |
 //! | 7 | 1 | `priority` (0..=7; media may not use 0/1) |
@@ -84,10 +84,6 @@ pub mod tlv {
 
     /// `u32` — the media stream this update belongs to (0 = default stream).
     pub const STREAM_ID: u8 = 0x10;
-    /// `u32` — FEC group id.
-    pub const FEC_GROUP_ID: u8 = 0x11;
-    /// `u16` — number of data fragments in the FEC group.
-    pub const FEC_K: u8 = 0x12;
     /// `u8` — the path this fragment was sent over (0 = default path).
     pub const PATH_ID: u8 = 0x13;
 
@@ -177,8 +173,6 @@ pub enum FragmentClass {
     Feedback = 3,
     /// Path/probe control (C5).
     Path = 4,
-    Datagram = 5,
-    Fec = 6,
 }
 
 impl FragmentClass {
@@ -203,8 +197,7 @@ impl FragmentClass {
     pub const fn traffic_class(self) -> TrafficClass {
         match self {
             Self::Control | Self::Path => TrafficClass::Control,
-            Self::Cursor | Self::Datagram => TrafficClass::Cursor,
-            Self::Fec => TrafficClass::Media,
+            Self::Cursor => TrafficClass::Cursor,
             Self::Media => TrafficClass::Media,
             Self::Feedback => TrafficClass::Feedback,
         }
@@ -218,8 +211,6 @@ impl FragmentClass {
             Self::Media => "media",
             Self::Feedback => "feedback",
             Self::Path => "path",
-            Self::Datagram => "datagram",
-            Self::Fec => "fec",
         }
     }
 }
@@ -1448,10 +1439,6 @@ mod tests {
             TrafficClass::Feedback
         );
         assert_eq!(FragmentClass::Path.traffic_class(), TrafficClass::Control);
-        assert_eq!(
-            FragmentClass::Datagram.traffic_class(),
-            TrafficClass::Cursor
-        );
         assert_eq!(TrafficClass::Media.default_priority(), 6);
         assert_eq!(TrafficClass::Refresh.default_priority(), 7);
         assert_eq!(TrafficClass::Control.default_priority(), 0);

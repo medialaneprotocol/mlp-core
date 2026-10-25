@@ -32,4 +32,5 @@ bash scripts/interop.sh
 
 ## Monitoring
 
-Prometheus metrics available at `/metrics` when deployed with the metrics feature.
+`mlp-server` wires the core's `PrometheusTelemetry` sink into every session
+and serves the rendered counters at `/metrics` (see the mlp-server README).

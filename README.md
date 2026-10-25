@@ -188,13 +188,8 @@ and `PathSelectionConfig`.
 
 ## Examples
 
-See `examples/` directory. Run with `cargo run --example <name>`.
-
-## Examples
-
-See `examples/` directory (13 examples). Run with `cargo run --example <name>`:
-basic, cursor, input, parking, resume, fragment, ack, cells, scheduler,
-lifecycle, pacer, path_selection, bwe, assembly, full.
+See `examples/` (25 examples, listed in `examples/README.md`). Run with
+`cargo run --example <name>`.
 
 ## Sibling repositories
 
@@ -211,14 +206,15 @@ lifecycle, pacer, path_selection, bwe, assembly, full.
 | Feature | Default | Description |
 |---|---|---|
 | `cli` | yes | Command-line tool |
-| `pacing` | yes | Token-bucket pacer (optional) |
-| `bwe` | yes | Bandwidth estimator (core) |
-| `path-selection` | yes | Path selector (optional) |
-| `resume` | yes | Session resume (optional) |
-| `input` | yes | Input path (core) |
-| `fec` | yes | Forward error correction |
+| `pacing` | yes | Token-bucket pacer |
+| `path-selection` | yes | Path selector |
+| `resume` | yes | Session resume |
+| `input` | yes | The input path's sender-side integration |
 
-Build without optional extensions: `cargo build --no-default-features --features "cli bwe input"`.
+The estimator, the scheduler, the cell accounting and the input machines are
+core code and are always compiled in.
+
+Build without optional extensions: `cargo build --no-default-features --features "cli input"`.
 
 ## Documentation
 

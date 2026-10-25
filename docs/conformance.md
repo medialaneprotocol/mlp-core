@@ -37,7 +37,6 @@ An implementation is **conformant** if it passes all tests in this specification
 - Repair plans (anchor + delta).
 - Flow control (per-stream + connection).
 - Loss detection (gap-based).
-- Forward error correction (XOR parity).
 - 0-RTT session resumption.
 - Connection migration.
 - Multipath and path probing.

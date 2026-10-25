@@ -1,41 +1,31 @@
-# Telemetry Schema (MLP)
+# Telemetry (MLP)
 
-Adapted from QUIC's qlog (draft-ietf-quic-qlog-main-schema). MLP emits
-structured events so that a deployment's measurements can be compared against
-the harness's predictions.
+The core is sans-IO: it keeps no clock and opens no socket, so it does not
+export metrics itself. It publishes a telemetry sink
+(`media::metrics::PrometheusTelemetry`) that a deployment feeds and scrapes.
 
-## Event format
+## Counter catalog
 
-Each event is a JSON object:
-
-```json
-{
-  "time": 1234.5,
-  "name": "mlp:fragment_sent",
-  "data": { ... }
-}
-```
-
-`time` is milliseconds since session start (session-relative, not wall clock).
-
-## Event catalog
-
-| Event | Fields | Description |
+| Counter | Type | Meaning |
 |---|---|---|
-| `mlp:session_started` | `carrier`, `grid_cells` | Lane opened. |
-| `mlp:fragment_sent` | `object_id`, `fragment_index`, `bytes`, `priority`, `echo_critical` | A fragment left the host. |
-| `mlp:fragment_received` | `object_id`, `fragment_index`, `bytes` | A fragment arrived. |
-| `mlp:object_assembled` | `object_id`, `update_id`, `bytes` | An object became whole. |
-| `mlp:update_applied` | `update_id`, `update_base`, `cells` | Receiver applied an update. |
-| `mlp:ack_sent` | `echo_of_input_seq`, `applied_update_id` | Acknowledgement emitted. |
-| `mlp:echo_measured` | `input_seq`, `echo_ms` | Sender measured an echo. |
-| `mlp:plan_started` | `plan_id`, `cells` | Repair plan started. |
-| `mlp:plan_completed` | `plan_id` | Repair plan completed. |
-| `mlp:parked` | `reason` | Session parked. |
-| `mlp:resumed` | `accepted` | Session resumed. |
-| `mlp:converged` | `pending_cells` | Receiver converged. |
+| `mlp_fragments_sent_total` | counter | Fragments that left the host. |
+| `mlp_fragments_received_total` | counter | Fragments that arrived. |
+| `mlp_bytes_sent_total` | counter | Payload bytes sent. |
+| `mlp_bytes_received_total` | counter | Payload bytes received. |
+| `mlp_updates_applied_total` | counter | Updates the receiver applied whole. |
+| `mlp_convergences_total` | counter | Times the receiver reached zero pending cells. |
+| `mlp_losses_total` | counter | Losses the receiver declared. |
+| `mlp_echoes_total` | counter | Input-to-echo measurements completed. |
 
-## Collection
+`PrometheusTelemetry::render()` produces the Prometheus text exposition
+format for all eight counters. `mlp-server` wires the sink into a session's
+two machines and serves the rendered page at `/metrics`.
 
-The harness writes these events to its trace JSON. A deployment SHOULD
-export them via its existing metrics pipeline (OpenTelemetry-compatible).
+## Predictions, not just measurements
+
+The harness publishes, per tier (`t0..`t4``), the predicted protocol
+budgets — echo percentiles, convergence bounds, repair cadence — as data
+(`mlp-harness tiers`, mirrored in `mlp-conformance/tiers.json`). A
+deployment's scraped counters are meant to be compared against those
+predictions; the conformance corpus (`mlp-conformance/decisions/`) holds the
+reference traces a comparison runs against.

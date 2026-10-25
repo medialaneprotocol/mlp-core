@@ -22,8 +22,6 @@
 pub mod bwe;
 pub mod cells;
 pub mod error;
-#[cfg(feature = "fec")]
-pub mod fec;
 pub mod flow;
 pub mod input;
 pub mod lifecycle;
@@ -45,8 +43,6 @@ pub mod ticket;
 
 pub use bwe::{BandwidthEstimator, BweConfig, BweMode, Estimate, PriorStore, ProbeRequest};
 pub use error::{MediaErrorCode, RejectReason};
-#[cfg(feature = "fec")]
-pub use fec::{build_parity_fragment, recover_one, xor_parity};
 pub use flow::{ConnectionFlowControl, FlowControl, StreamFlowControl};
 pub use lifecycle::{LaneMode, MediaCloseCode, MediaLaneStateKind, MediaUnsupportedReason};
 pub use loss::LossDetector;

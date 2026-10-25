@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Removed
+- **The `fec` feature and the `media::fec` module.** The XOR-parity helper
+  was never wired to a sender or a receiver, referenced a spec section that
+  does not exist (§6.9), and built parity fragments in a class the wire
+  reserves (`5..255 ⇒ BAD_CLASS`) — every conformant receiver, this crate's
+  own included, would have dropped them. Forward error correction moves to
+  the v0.2 plan, to be designed into the spec before it exists in code.
+- The `Datagram`/`Fec` fragment-class variants and their CLI spellings, for
+  the same reason: the wire freezes classes at `0..=4`. Their `class_slot`
+  mapping was a latent out-of-bounds panic next to the five-slot
+  `objects_by_class` counter.
+- The `bwe` cargo feature: nothing was gated behind it (the estimator is
+  core code and always compiled in). The declared-but-dead feature is gone.
+- The `FEC_GROUP_ID`/`FEC_K` TLV kinds from the registry.
+
+### Fixed
+- The `pdu.rs` layout table said magic `52 4D 4C 50` and `version = 2`; the
+  wire carries `4D 4C 50 00` ("MLP\0") and version 1. The same wrong version
+  sat in `error.rs`'s `UnsupportedVersion` doc.
+- `docs/wire-format.md` taught the pre-freeze flag layout (bit 0 ANCHOR,
+  bit 1 ECHO_REQUESTED, bit 2 DUPLICATE) — the layout the Go/Python/C
+  skeletons were written against. It now teaches the real one (FIN 0x01,
+  ANCHOR 0x02, RETRANSMIT 0x04, DUP 0x08, ECHO_REQUESTED 0x10, PROBE 0x20,
+  URGENT 0x40) and the full TLV registry.
+- `docs/architecture.md` listed 12 of the 19 media modules and two feature
+  gates that gate nothing; `docs/telemetry.md` described a 12-event qlog
+  catalog no code emits — it now documents the eight Prometheus counters
+  that exist; `docs/compliance.md` marked the satellite implementations'
+  wire format "Full" while they drifted — the matrix now carries the
+  implementations' own test results and a TypeScript column;
+  `docs/implementations.md` gained the two implementations it omitted
+  (mlp-ts, mlp-server).
+- The crate claimed the `no-std::no-alloc` category while using `std`;
+  `rust-version` is now the one the sibling crates already require (1.88).
+- `scripts/validate_all.sh` and `scripts/interop.sh` no longer default to a
+  foreign machine's `/tmp/opencode/bench-work`; they resolve the sibling
+  repositories relative to this checkout.
+
 ### Added
 - Reference implementations: Go, Python, C (wire format, golden-vector parity).
 - `docs/security.md` and `docs/iana.md` drafts.
@@ -11,7 +49,9 @@
 - Echo-critical pulses bypass the rate limiter while staying within the 1-second pacing window (INV-7).
 - Builder methods for all configuration structs.
 - 12+ usage examples in `examples/`.
-- Real cell accounting support (via tessellio-core `changed_cell_indices`).
+- `UpdateRequest::cells` carries the encoder's measured covered-cell
+  indices, so the accounting advances on what the codec actually changed
+  (the tessellio codec's `changed_cell_indices` feeds it; see tessellio-bench).
 
 ### Changed
 - **The ack's own window is a loss report.** An update inside the
