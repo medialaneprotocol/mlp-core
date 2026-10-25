@@ -959,6 +959,13 @@ impl MediaSenderMachine {
         self.last_estimate
     }
 
+    /// The freshest loss picture the terrible-lane rule reads (MLP spec
+    /// §6.9): the closed window's measurement with the prompt
+    /// attributions folded in as they arrive.
+    pub fn fec_loss_ratio(&self) -> f64 {
+        self.fec_loss_ratio
+    }
+
     /// The session-relative millisecond clock.
     pub fn session_ms(&self, now: Instant) -> u64 {
         now.saturating_duration_since(self.started).as_millis() as u64
@@ -1511,18 +1518,12 @@ impl MediaSenderMachine {
         }
         // A prompt's loss attribution is the fact the sender cannot wait
         // for (MLP spec §6.2.1): the estimator's goodput filters take only
-        // closed windows, but the terrible-lane rule (§6.9) reads the loss
-        // ratio, and a multi-part group offered into a lane the receiver
-        // says is losing it deserves its parity now, not at the next
-        // window's close.
-        // A prompt's loss attribution is the fact the sender cannot wait
-        // for (MLP spec §6.2.1): the estimator's goodput filters take only
         // closed windows, but the terrible-lane rule (§6.9) reads the
         // freshest loss picture, and a multi-part group offered into a
         // lane the receiver says is losing it deserves its parity now,
         // not at the next window's close. The attribution is smoothed
-        // inside the estimator, and it feeds this ratio alone — the
-        // estimate's own ratio stays the closed window's measurement.
+        // inside the estimator, and it feeds the parity's own ratio alone
+        // — the estimate's ratio stays the closed window's measurement.
         if feedback.window_ms == 0 {
             self.estimator
                 .on_prompt_loss(feedback.lost_objects, feedback.received_objects);
