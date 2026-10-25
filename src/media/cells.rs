@@ -293,6 +293,10 @@ pub struct CellCounters {
 pub struct AckOutcome {
     /// Applied updates named by the bitmap.
     pub applied_updates: u32,
+    /// Updates the ack's own window declared missing (early repair, MLP
+    /// spec §6.5.3): their cells went due at once instead of waiting the
+    /// repair delay for a loss the receiver already reported.
+    pub window_lost_updates: u32,
     /// Cells removed from pending.
     pub cleared_cells: u32,
     /// Whether the ack named a update outside the ring.
@@ -597,11 +601,11 @@ impl CellAccounting {
         // onto any held state), so the accounting clears the coverage of the
         // applied updates themselves: strictly safer, and identical in the
         // intact-chain case because every applied update is acked in turn.
-        for update in applied {
+        for update in &applied {
             let Some(covered) = self
                 .ring
                 .iter()
-                .find(|record| record.update_id == update)
+                .find(|record| record.update_id == *update)
                 .map(|record| record.cells.clone())
             else {
                 // Outside the ring: nothing can be cleared safely.
@@ -609,7 +613,7 @@ impl CellAccounting {
             };
             for cell in covered {
                 let state = &mut self.pending[cell as usize];
-                if state.ever_sent && state.update_id == update {
+                if state.ever_sent && state.update_id == *update {
                     *state = CellState::fresh();
                     outcome.cleared_cells += 1;
                 }
@@ -620,6 +624,35 @@ impl CellAccounting {
             // The content advanced: this is the progress the lane's freshness
             // is measured against (MLP spec §6.7.1).
             self.last_progress_at_ms = Some(now_ms);
+        }
+        // The window's own verdict (MLP spec §6.5.3): an update inside the
+        // bitmap's reach that the receiver did not name is an update the
+        // receiver does not hold, and the bitmap's reach is the last
+        // `ACK_WINDOW` ids under the highest applied one. The loss is known
+        // the moment the ack arrives; a repair that waits its repair delay for
+        // it waits for nothing. (An update the receiver holds but has not yet
+        // applied can sit in that gap for one ack interval — the repair it
+        // triggers is redundant, which is the cheap side of the trade the
+        // ring-miss already takes: re-send beats waiting.)
+        let window_base = effective.saturating_sub(63);
+        for record in self.ring.iter() {
+            if record.update_id > effective || record.update_id <= window_base {
+                continue;
+            }
+            if applied.contains(&record.update_id) {
+                continue;
+            }
+            let mut named = false;
+            for cell in &record.cells {
+                let state = &mut self.pending[*cell as usize];
+                if state.ever_sent && state.update_id == record.update_id {
+                    state.due_override = true;
+                    named = true;
+                }
+            }
+            if named {
+                outcome.window_lost_updates += 1;
+            }
         }
         // The stuck set is recomputed from the current truth.
         self.stuck_cells
