@@ -35,7 +35,7 @@ pub const FEC_MAX_K: usize = 8;
 /// repair ladder and its anchors are the honest tool. The band is where
 /// one lost part per group is the common case and is recovered for free.
 pub const FEC_LOSS_RATIO: f64 = 0.02;
-pub const FEC_LOSS_RATIO_MAX: f64 = 0.15;
+pub const FEC_LOSS_RATIO_MAX: f64 = 0.25;
 
 /// CRC-32 (IEEE 802.3), table-free: the polynomial walks a byte at a time.
 pub fn crc32(bytes: &[u8]) -> u32 {
