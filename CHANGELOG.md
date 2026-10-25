@@ -14,6 +14,13 @@
 - Real cell accounting support (via tessellio-core `changed_cell_indices`).
 
 ### Changed
+- **The ack's own window is a loss report.** An update inside the
+  acknowledgement bitmap's reach that the bitmap does not name is
+  missing by the receiver's own statement; its cells go due the moment
+  the ack arrives instead of waiting `repair_delay`. Canonical T4
+  residue 40 -> 15 cells, T2 convergence 226 -> 174 ms, T0 echo p95
+  19 -> 15 ms. `AckOutcome.window_lost_updates` counts the declared
+  losses.
 - **The estimate can grow in `Steady` again (the freeze fix).** Three
   changes, one contract: a probe is paced at `1.25 × max(btlbw, pace)`
   (never below the estimate), a probe pending in `Steady` opens a
