@@ -97,18 +97,10 @@ fn two_part_request(update_id_hint: u64) -> UpdateRequest {
 #[test]
 fn a_lossy_lane_attaches_parity_to_a_multi_part_update() {
     let mut sender = lossy_sender();
-    let outcome = match sender.enqueue_update(two_part_request(1), Instant::now()) {
+    match sender.enqueue_update(two_part_request(1), Instant::now()) {
         EnqueueOutcome::Accepted { .. } => (),
         other => panic!("the write queue refused a quiet lane: {other:?}"),
     };
-    let _ = outcome;
-    eprintln!(
-        "DEBUG2 fec={} queued={} loss={:?} est_loss={:?}",
-        sender.stats().fec_parity_sent_total,
-        sender.queued_objects(),
-        sender.estimate().loss_ratio,
-        sender.estimator().loss_ratio()
-    );
     // Poll every object: the two parts plus one parity object.
     let mut parity_objects = 0usize;
     let mut parts_seen = 0usize;
@@ -130,12 +122,6 @@ fn a_lossy_lane_attaches_parity_to_a_multi_part_update() {
             parts_seen += 1;
         }
     }
-    eprintln!(
-        "DEBUG parts_seen={parts_seen} parity={parity_objects} queued={} loss={:?} fec={}",
-        sender.queued_objects(),
-        sender.estimate().loss_ratio,
-        sender.stats().fec_parity_sent_total
-    );
     assert_eq!(parts_seen, 2, "the update's two parts");
     assert_eq!(parity_objects, 1, "one parity object rides the group");
     assert_eq!(sender.stats().fec_parity_sent_total, 1);
