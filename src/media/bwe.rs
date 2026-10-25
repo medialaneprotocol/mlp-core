@@ -480,13 +480,16 @@ impl BandwidthEstimator {
             return;
         }
         let sample = lost_objects as f64 / attempted as f64;
+        // A prompt's sample is small, so it nudges instead of setting —
+        // and the first attribution is discounted by its own size: a lone
+        // lost pair is a hint, not a measurement, while a lane the receiver
+        // keeps naming as lossy climbs to its real ratio within a few
+        // prompts.
+        let confidence = attempted as f64 / (attempted as f64 + 4.0);
+        let weighted = sample * confidence;
         self.prompt_loss_ratio = Some(match self.prompt_loss_ratio {
-            // A prompt's sample is small, so it nudges instead of setting:
-            // the same smoothing every other measurement in this estimator
-            // takes. A lane the receiver keeps naming as lossy still climbs
-            // to its real ratio within a few prompts.
-            Some(previous) => previous + 0.25 * (sample - previous),
-            None => sample,
+            Some(previous) => previous + 0.25 * (weighted - previous),
+            None => weighted,
         });
     }
 
