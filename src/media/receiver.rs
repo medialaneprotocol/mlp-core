@@ -141,6 +141,10 @@ pub struct ReceiverStats {
     pub duplicate_objects: u64,
     /// Parts recovered from the wire parity (MLP spec §6.9).
     pub parity_recovered_total: u64,
+    /// Parity objects whose XOR did not check out against the group's CRC:
+    /// each one recovered nothing, and the repair ladder answered (MLP
+    /// spec §6.9, INV-11).
+    pub parity_rejected_total: u64,
     /// Media updates that arrived out of order (the update-id space).
     pub reordered_objects: u64,
     /// Gaps in the **update-id** space observed (the receiver's loss signal).
@@ -449,15 +453,21 @@ impl MediaReceiverMachine {
                     // group's XOR (MLP spec §6.9). It feeds the tracker and
                     // never reaches the driver.
                     if let Some((group_id, k)) = super::fec::parity_group(&object.ext) {
-                        if let Some(recovered) = self.fec.on_parity(
+                        match self.fec.on_parity(
                             group_id,
                             k,
                             &object.payload,
                             object.ext.clone(),
                             now,
                         ) {
-                            self.count_recovered(&recovered);
-                            events.push(MediaReceiveEvent::ParityRecovered(recovered));
+                            Recovery::Recovered(recovered) => {
+                                self.count_recovered(&recovered);
+                                events.push(MediaReceiveEvent::ParityRecovered(recovered));
+                            }
+                            Recovery::Rejected => {
+                                self.stats.parity_rejected_total += 1;
+                            }
+                            Recovery::Nothing => {}
                         }
                         continue;
                     }
@@ -485,12 +495,20 @@ impl MediaReceiverMachine {
                     if let Some(meta) = object.update_meta()
                         && meta.part_count >= 2
                         && meta.update_id >= 1
-                        && let Some(recovered) =
-                            self.fec
-                                .on_part(&meta, &object.payload, object.ext.clone(), now)
                     {
-                        self.count_recovered(&recovered);
-                        events.push(MediaReceiveEvent::ParityRecovered(recovered));
+                        match self
+                            .fec
+                            .on_part(&meta, &object.payload, object.ext.clone(), now)
+                        {
+                            Recovery::Recovered(recovered) => {
+                                self.count_recovered(&recovered);
+                                events.push(MediaReceiveEvent::ParityRecovered(recovered));
+                            }
+                            Recovery::Rejected => {
+                                self.stats.parity_rejected_total += 1;
+                            }
+                            Recovery::Nothing => {}
+                        }
                     }
                     if object.flags.contains(FragmentFlags::ECHO_REQUESTED) {
                         let echo = ProbeEcho {
@@ -937,6 +955,20 @@ struct FecGroup {
 /// group older than the newest eight is a group the repair ladder owns.
 const FEC_TRACKER_CAPACITY: usize = 8;
 
+/// What the tracker's recovery attempt decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Recovery {
+    /// The missing part came back and proved itself (MLP spec §6.9).
+    Recovered(MediaObject),
+    /// The parity does not check out against the group's CRC: it recovers
+    /// nothing, and the repair ladder owns the group. Accounted, so a wire
+    /// that garbles parity is observable (INV-11).
+    Rejected,
+    /// Nothing to recover: the parity is not here (yet), or the group is
+    /// whole.
+    Nothing,
+}
+
 impl FecTracker {
     fn new() -> Self {
         Self { groups: Vec::new() }
@@ -971,7 +1003,7 @@ impl FecTracker {
         payload: &[u8],
         template: HeaderExt,
         now: Instant,
-    ) -> Option<MediaObject> {
+    ) -> Recovery {
         let group = self.group(meta.update_id, meta.part_count, template);
         group.held[meta.part_index as usize] = Some(payload.to_vec());
         let complete = group.held.iter().all(Option::is_some);
@@ -979,7 +1011,7 @@ impl FecTracker {
             // The parts all arrived: the parity has nothing to do.
             self.groups
                 .retain(|candidate| candidate.update_id != meta.update_id);
-            return None;
+            return Recovery::Nothing;
         }
         self.recover(meta.update_id, now)
     }
@@ -992,19 +1024,24 @@ impl FecTracker {
         payload: &[u8],
         template: HeaderExt,
         now: Instant,
-    ) -> Option<MediaObject> {
+    ) -> Recovery {
         let group = self.group(update_id, part_count, template);
         group.parity = Some(payload.to_vec());
         self.recover(update_id, now)
     }
 
-    fn recover(&mut self, update_id: u64, now: Instant) -> Option<MediaObject> {
-        let index = self
+    fn recover(&mut self, update_id: u64, now: Instant) -> Recovery {
+        let Some(index) = self
             .groups
             .iter()
-            .position(|group| group.update_id == update_id)?;
+            .position(|group| group.update_id == update_id)
+        else {
+            return Recovery::Nothing;
+        };
         let group = &self.groups[index];
-        let parity = group.parity.as_ref()?;
+        let Some(parity) = group.parity.as_ref() else {
+            return Recovery::Nothing;
+        };
         let held: Vec<(u16, Vec<u8>)> = group
             .held
             .iter()
@@ -1015,8 +1052,9 @@ impl FecTracker {
             super::fec::recover_part(parity, &held, group.part_count as usize)
         else {
             // A parity that does not check out is a parity that proves
-            // nothing: the repair ladder owns this group.
-            return None;
+            // nothing: the repair ladder owns this group (MLP spec §6.9,
+            // INV-11).
+            return Recovery::Rejected;
         };
         // The recovered part is indistinguishable from a wire one: the
         // template's metadata plus the part slot recovery just filled.
@@ -1034,7 +1072,7 @@ impl FecTracker {
             completed_at: now,
         };
         self.groups.remove(index);
-        Some(object)
+        Recovery::Recovered(object)
     }
 }
 
